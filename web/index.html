@@ -1,0 +1,835 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>签到控制台</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --line: #d8dde6;
+      --text: #1d2430;
+      --muted: #667085;
+      --accent: #126c57;
+      --accent-2: #9b4d1f;
+      --danger: #b42318;
+      --ok: #067647;
+      --warn: #b54708;
+      --shadow: 0 1px 2px rgba(16, 24, 40, .06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    button, input, select, textarea {
+      font: inherit;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--text);
+      min-height: 34px;
+      border-radius: 6px;
+      padding: 6px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button.danger {
+      color: var(--danger);
+      border-color: #f2b8b5;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .55;
+    }
+    input, select, textarea {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 9px;
+      background: #fff;
+      color: var(--text);
+    }
+    textarea {
+      min-height: 82px;
+      resize: vertical;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .app {
+      min-height: 100vh;
+    }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.92);
+      backdrop-filter: blur(12px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+    .mark {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .tabs button {
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+    }
+    .tabs button.active {
+      background: #e7f3ee;
+      color: var(--accent);
+      border-color: #cae6dd;
+    }
+    .wrap {
+      width: min(1180px, calc(100vw - 28px));
+      margin: 18px auto 42px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .toolbar h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.25;
+    }
+    .grid {
+      display: grid;
+      gap: 12px;
+    }
+    .grid.two {
+      grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .stat, .panel, .item {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+    }
+    .stat {
+      padding: 14px;
+      min-height: 86px;
+    }
+    .stat b {
+      display: block;
+      font-size: 26px;
+      line-height: 1.1;
+      margin-top: 6px;
+    }
+    .panel {
+      padding: 14px;
+    }
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 15px;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .form-grid .wide {
+      grid-column: 1 / -1;
+    }
+    .checks {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      align-items: center;
+      min-height: 34px;
+    }
+    .checks label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+      font-size: 13px;
+    }
+    .checks input {
+      width: 16px;
+      min-height: 16px;
+    }
+    .list {
+      display: grid;
+      gap: 10px;
+    }
+    .item {
+      padding: 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .item-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .item-title {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #f9fafb;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .badge.ok { color: var(--ok); background: #ecfdf3; border-color: #abefc6; }
+    .badge.fail { color: var(--danger); background: #fef3f2; border-color: #fecdca; }
+    .badge.warn { color: var(--warn); background: #fffaeb; border-color: #fedf89; }
+    .actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 780px;
+    }
+    th, td {
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      background: #fbfcfe;
+    }
+    td {
+      overflow-wrap: anywhere;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    .login {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .login .panel {
+      width: min(380px, 100%);
+    }
+    .message {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 10;
+      max-width: min(420px, calc(100vw - 36px));
+      padding: 11px 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: 0 10px 30px rgba(16,24,40,.14);
+      display: none;
+      overflow-wrap: anywhere;
+    }
+    .message.show { display: block; }
+    .message.error { border-color: #fecdca; color: var(--danger); }
+    .hidden { display: none !important; }
+    @media (max-width: 860px) {
+      .topbar {
+        position: static;
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .grid.two, .stats, .form-grid {
+        grid-template-columns: 1fr;
+      }
+      .item-head {
+        flex-direction: column;
+      }
+      .actions {
+        width: 100%;
+      }
+      .actions button {
+        flex: 1 1 auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form class="panel" id="loginForm">
+      <div class="brand" style="margin-bottom:18px"><span class="mark"></span><span>签到控制台</span></div>
+      <div class="grid">
+        <label>用户名<input id="loginUser" autocomplete="username" value="admin"></label>
+        <label>密码<input id="loginPass" type="password" autocomplete="current-password" value="admin"></label>
+        <button class="primary" type="submit">登录</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand"><span class="mark"></span><span>签到控制台</span></div>
+      <nav class="tabs">
+        <button data-tab="overview" class="active">总览</button>
+        <button data-tab="accounts">账号</button>
+        <button data-tab="config">配置</button>
+        <button data-tab="history">历史</button>
+        <button id="logoutBtn">退出</button>
+      </nav>
+    </header>
+
+    <main class="wrap">
+      <section id="tab-overview">
+        <div class="toolbar">
+          <h1>总览</h1>
+          <div class="actions">
+            <button id="refreshOverview">刷新</button>
+            <button class="primary" id="batchAll">签到全部启用账号</button>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><span>账号总数</span><b id="statAccounts">0</b></div>
+          <div class="stat"><span>启用账号</span><b id="statEnabled">0</b></div>
+          <div class="stat"><span>今日成功</span><b id="statSuccess">0</b></div>
+          <div class="stat"><span>今日失败</span><b id="statFailed">0</b></div>
+        </div>
+        <div class="panel" style="margin-top:12px">
+          <h2>最近结果</h2>
+          <div id="recentList" class="list"></div>
+        </div>
+      </section>
+
+      <section id="tab-accounts" class="hidden">
+        <div class="toolbar">
+          <h1>账号</h1>
+          <div class="actions">
+            <select id="accountFilter" style="width:150px">
+              <option value="">全部平台</option>
+              <option value="hdhive">影巢</option>
+              <option value="juying">聚影</option>
+            </select>
+            <button id="newAccount">新建账号</button>
+          </div>
+        </div>
+        <div class="grid two">
+          <div class="panel">
+            <h2>账号列表</h2>
+            <div id="accountList" class="list"></div>
+          </div>
+          <form class="panel" id="accountForm">
+            <h2 id="accountFormTitle">新建账号</h2>
+            <input type="hidden" id="accountId">
+            <div class="form-grid">
+              <label>平台
+                <select id="accountPlatform">
+                  <option value="juying">聚影</option>
+                  <option value="hdhive">影巢</option>
+                </select>
+              </label>
+              <label>名称<input id="accountName" placeholder="主号"></label>
+              <label>定时<input id="accountCron" placeholder="30 8" value="30 8"></label>
+              <label>认证方式
+                <select id="accountAuthMode">
+                  <option value="">自动</option>
+                  <option value="账号密码">账号密码</option>
+                  <option value="Cookie">Cookie</option>
+                  <option value="sessionid">sessionid/csrftoken</option>
+                  <option value="AppID/API Key">AppID/API Key</option>
+                </select>
+              </label>
+              <div class="checks wide">
+                <label><input type="checkbox" id="accountEnabled" checked>启用</label>
+                <label><input type="checkbox" id="accountNotifyTG" checked>Telegram</label>
+                <label><input type="checkbox" id="accountNotifyWebhook" checked>Webhook</label>
+                <label><input type="checkbox" id="accountDog">影巢赌狗抽签</label>
+              </div>
+              <label>账号<input id="credUsername" autocomplete="off"></label>
+              <label>密码<input id="credPassword" type="password" autocomplete="new-password"></label>
+              <label>API Key<input id="credApiKey" autocomplete="off"></label>
+              <label>AppID<input id="credAppId" autocomplete="off"></label>
+              <label class="wide">Cookie<textarea id="credCookie" spellcheck="false"></textarea></label>
+              <label>sessionid<input id="credSessionId" autocomplete="off"></label>
+              <label>csrftoken<input id="credCsrfToken" autocomplete="off"></label>
+              <div class="actions wide">
+                <button class="primary" type="submit">保存账号</button>
+                <button type="button" id="resetAccountForm">清空</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section id="tab-config" class="hidden">
+        <div class="toolbar">
+          <h1>配置</h1>
+          <button class="primary" id="saveConfig">保存配置</button>
+        </div>
+        <form class="grid two" id="configForm">
+          <div class="panel">
+            <h2>基础</h2>
+            <div class="form-grid">
+              <label>时区<input id="cfgTimezone" value="Asia/Shanghai"></label>
+              <label>控制台用户名<input id="cfgWebUser"></label>
+              <label>控制台密码<input id="cfgWebPass" type="password"></label>
+              <label>随机延迟秒数<input id="cfgDelay" type="number" min="0" max="600"></label>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>通知</h2>
+            <div class="form-grid">
+              <label>Telegram Bot Token<input id="cfgTgToken"></label>
+              <label>Telegram Admin ID<input id="cfgTgAdmin"></label>
+              <label>Telegram 代理<input id="cfgTgProxy"></label>
+              <label>Webhook URL<input id="cfgWebhook"></label>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>影巢</h2>
+            <div class="form-grid">
+              <label>Base URL<input id="cfgHdhiveBase"></label>
+              <label>全局 API Key<input id="cfgHdhiveKey"></label>
+              <label class="wide">代理 URL<input id="cfgHdhiveProxy"></label>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>聚影</h2>
+            <div class="form-grid">
+              <label>Base URL<input id="cfgJuyingBase"></label>
+              <label>签到路径<input id="cfgJuyingPath"></label>
+              <label>代理模式
+                <select id="cfgJuyingProxyMode">
+                  <option value="direct">direct</option>
+                  <option value="tg_proxy">tg_proxy</option>
+                  <option value="custom_proxy">custom_proxy</option>
+                </select>
+              </label>
+              <label>自定义代理<input id="cfgJuyingProxy"></label>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <section id="tab-history" class="hidden">
+        <div class="toolbar">
+          <h1>历史</h1>
+          <div class="actions">
+            <select id="historyPlatform" style="width:150px">
+              <option value="">全部平台</option>
+              <option value="hdhive">影巢</option>
+              <option value="juying">聚影</option>
+            </select>
+            <button id="refreshHistory">刷新</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>平台</th><th>账号</th><th>状态</th><th>模式</th><th>详情</th><th>积分</th></tr></thead>
+            <tbody id="historyRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="message"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const state = { accounts: [], config: null };
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      return data.data ?? data;
+    }
+
+    function toast(text, error = false) {
+      const el = $('toast');
+      el.textContent = text;
+      el.className = 'message show' + (error ? ' error' : '');
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => el.className = 'message', 3600);
+    }
+
+    function platformName(v) {
+      return v === 'hdhive' ? '影巢' : v === 'juying' ? '聚影' : v;
+    }
+
+    function fmtTime(v) {
+      if (!v) return '-';
+      return new Date(v).toLocaleString();
+    }
+
+    function statusBadge(ok) {
+      return ok ? '<span class="badge ok">成功</span>' : '<span class="badge fail">失败</span>';
+    }
+
+    async function boot() {
+      try {
+        await api('/api/me');
+        $('login').classList.add('hidden');
+        $('app').classList.remove('hidden');
+        await Promise.all([loadConfig(), loadAccounts(), loadOverview(), loadHistory()]);
+      } catch {
+        $('login').classList.remove('hidden');
+        $('app').classList.add('hidden');
+      }
+    }
+
+    async function loadOverview() {
+      const data = await api('/api/overview');
+      $('statAccounts').textContent = data.account_count;
+      $('statEnabled').textContent = data.enabled_count;
+      $('statSuccess').textContent = data.today_success;
+      $('statFailed').textContent = data.today_failed;
+      $('recentList').innerHTML = (data.recent_records || []).slice(0, 8).map(recordItem).join('') || '<div class="meta">暂无记录</div>';
+    }
+
+    async function loadAccounts() {
+      const platform = $('accountFilter').value;
+      const data = await api('/api/accounts' + (platform ? `?platform=${encodeURIComponent(platform)}` : ''));
+      state.accounts = data || [];
+      $('accountList').innerHTML = state.accounts.map(accountItem).join('') || '<div class="meta">暂无账号</div>';
+    }
+
+    async function loadHistory() {
+      const platform = $('historyPlatform').value;
+      const data = await api('/api/signin/records?limit=100' + (platform ? `&platform=${encodeURIComponent(platform)}` : ''));
+      $('historyRows').innerHTML = (data || []).map(r => `
+        <tr>
+          <td>${fmtTime(r.finished_at)}</td>
+          <td>${platformName(r.platform)}</td>
+          <td>${escapeHtml(r.account_name || '-')}</td>
+          <td>${statusBadge(r.success)}</td>
+          <td>${escapeHtml(r.mode || '-')}</td>
+          <td>${escapeHtml(r.message || '-')}</td>
+          <td>${r.reward_points ? `${r.reward_points > 0 ? '+' : ''}${r.reward_points}` : '-'} / ${r.total_points || '-'}</td>
+        </tr>
+      `).join('') || '<tr><td colspan="7">暂无记录</td></tr>';
+    }
+
+    async function loadConfig() {
+      const data = await api('/api/config');
+      state.config = data;
+      $('cfgTimezone').value = data.timezone || 'Asia/Shanghai';
+      $('cfgWebUser').value = data.web?.username || 'admin';
+      $('cfgWebPass').value = data.web?.password || '';
+      $('cfgDelay').value = data.scheduler?.random_delay_seconds ?? 15;
+      $('cfgTgToken').value = data.notify?.telegram_bot_token || '';
+      $('cfgTgAdmin').value = data.notify?.telegram_admin_id || '';
+      $('cfgTgProxy').value = data.notify?.telegram_proxy_url || '';
+      $('cfgWebhook').value = data.notify?.webhook_url || '';
+      $('cfgHdhiveBase').value = data.providers?.hdhive?.base_url || '';
+      $('cfgHdhiveKey').value = data.providers?.hdhive?.global_api_key || '';
+      $('cfgHdhiveProxy').value = data.providers?.hdhive?.proxy_url || '';
+      $('cfgJuyingBase').value = data.providers?.juying?.base_url || '';
+      $('cfgJuyingPath').value = data.providers?.juying?.signin_path || '';
+      $('cfgJuyingProxyMode').value = data.providers?.juying?.proxy_mode || 'direct';
+      $('cfgJuyingProxy').value = data.providers?.juying?.proxy_url || '';
+    }
+
+    function accountItem(a) {
+      const enabled = a.enabled ? '<span class="badge ok">启用</span>' : '<span class="badge warn">禁用</span>';
+      const dog = a.options?.dog ? '<span class="badge warn">赌狗</span>' : '';
+      return `
+        <article class="item">
+          <div class="item-head">
+            <div>
+              <div class="item-title">${escapeHtml(a.name || a.credential?.username || a.id)}</div>
+              <div class="meta">
+                <span>${platformName(a.platform)}</span>
+                <span>定时 ${escapeHtml(a.cron || '-')}</span>
+                ${enabled}${dog}
+              </div>
+            </div>
+            <div class="actions">
+              <button onclick="signOne('${a.id}')">签到</button>
+              <button onclick="editAccount('${a.id}')">编辑</button>
+              <button onclick="toggleAccount('${a.id}')">${a.enabled ? '禁用' : '启用'}</button>
+              <button class="danger" onclick="deleteAccount('${a.id}')">删除</button>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    function recordItem(r) {
+      return `
+        <article class="item">
+          <div class="item-head">
+            <div>
+              <div class="item-title">${escapeHtml(r.account_name || '-')}</div>
+              <div class="meta">
+                <span>${platformName(r.platform)}</span>
+                <span>${fmtTime(r.finished_at)}</span>
+                ${statusBadge(r.success)}
+              </div>
+            </div>
+            <div class="meta">${escapeHtml(r.mode || '-')}</div>
+          </div>
+          <div>${escapeHtml(r.message || '-')}</div>
+        </article>
+      `;
+    }
+
+    function resetAccountForm() {
+      $('accountForm').reset();
+      $('accountId').value = '';
+      $('accountFormTitle').textContent = '新建账号';
+      $('accountPlatform').value = 'juying';
+      $('accountCron').value = '30 8';
+      $('accountEnabled').checked = true;
+      $('accountNotifyTG').checked = true;
+      $('accountNotifyWebhook').checked = true;
+    }
+
+    window.editAccount = (id) => {
+      const a = state.accounts.find(x => x.id === id);
+      if (!a) return;
+      $('accountId').value = a.id;
+      $('accountFormTitle').textContent = '编辑账号';
+      $('accountPlatform').value = a.platform;
+      $('accountName').value = a.name || '';
+      $('accountCron').value = a.cron || '30 8';
+      $('accountAuthMode').value = a.options?.auth_mode || '';
+      $('accountEnabled').checked = !!a.enabled;
+      $('accountNotifyTG').checked = !!a.notify_tg;
+      $('accountNotifyWebhook').checked = !!a.notify_webhook;
+      $('accountDog').checked = !!a.options?.dog;
+      $('credUsername').value = a.credential?.username || '';
+      $('credPassword').value = a.credential?.password || '';
+      $('credApiKey').value = a.credential?.api_key || '';
+      $('credAppId').value = a.credential?.app_id || '';
+      $('credCookie').value = a.credential?.cookie || '';
+      $('credSessionId').value = a.credential?.sessionid || '';
+      $('credCsrfToken').value = a.credential?.csrftoken || '';
+      switchTab('accounts');
+    };
+
+    window.signOne = async (id) => {
+      try {
+        toast('正在签到...');
+        const r = await api('/api/signin/' + encodeURIComponent(id), { method: 'POST', body: '{}' });
+        toast((r.success ? '签到成功: ' : '签到失败: ') + (r.message || ''));
+        await Promise.all([loadOverview(), loadHistory()]);
+      } catch (err) {
+        toast(err.message, true);
+        await Promise.all([loadOverview(), loadHistory()]);
+      }
+    };
+
+    window.toggleAccount = async (id) => {
+      try {
+        await api(`/api/accounts/${encodeURIComponent(id)}/toggle`, { method: 'POST', body: '{}' });
+        await Promise.all([loadAccounts(), loadOverview()]);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+
+    window.deleteAccount = async (id) => {
+      if (!confirm('删除这个账号？')) return;
+      try {
+        await api('/api/accounts/' + encodeURIComponent(id), { method: 'DELETE' });
+        resetAccountForm();
+        await Promise.all([loadAccounts(), loadOverview()]);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+
+    $('loginForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      try {
+        await api('/api/login', {
+          method: 'POST',
+          body: JSON.stringify({ username: $('loginUser').value, password: $('loginPass').value })
+        });
+        await boot();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    $('accountForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const id = $('accountId').value;
+      const payload = {
+        platform: $('accountPlatform').value,
+        name: $('accountName').value,
+        enabled: $('accountEnabled').checked,
+        cron: $('accountCron').value,
+        notify_tg: $('accountNotifyTG').checked,
+        notify_webhook: $('accountNotifyWebhook').checked,
+        credential: {
+          username: $('credUsername').value,
+          password: $('credPassword').value,
+          api_key: $('credApiKey').value,
+          app_id: $('credAppId').value,
+          cookie: $('credCookie').value,
+          sessionid: $('credSessionId').value,
+          csrftoken: $('credCsrfToken').value
+        },
+        options: {
+          dog: $('accountDog').checked,
+          auth_mode: $('accountAuthMode').value
+        }
+      };
+      try {
+        if (id) {
+          await api('/api/accounts/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify(payload) });
+        } else {
+          await api('/api/accounts', { method: 'POST', body: JSON.stringify(payload) });
+        }
+        toast('账号已保存');
+        resetAccountForm();
+        await Promise.all([loadAccounts(), loadOverview()]);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    $('saveConfig').addEventListener('click', async () => {
+      const payload = {
+        timezone: $('cfgTimezone').value,
+        web: { username: $('cfgWebUser').value, password: $('cfgWebPass').value },
+        notify: {
+          telegram_bot_token: $('cfgTgToken').value,
+          telegram_admin_id: $('cfgTgAdmin').value,
+          telegram_proxy_url: $('cfgTgProxy').value,
+          webhook_url: $('cfgWebhook').value
+        },
+        providers: {
+          hdhive: {
+            base_url: $('cfgHdhiveBase').value,
+            global_api_key: $('cfgHdhiveKey').value,
+            proxy_url: $('cfgHdhiveProxy').value
+          },
+          juying: {
+            base_url: $('cfgJuyingBase').value,
+            signin_path: $('cfgJuyingPath').value,
+            proxy_mode: $('cfgJuyingProxyMode').value,
+            proxy_url: $('cfgJuyingProxy').value
+          }
+        },
+        scheduler: { random_delay_seconds: Number($('cfgDelay').value || 0) }
+      };
+      try {
+        await api('/api/config', { method: 'POST', body: JSON.stringify(payload) });
+        toast('配置已保存');
+        await loadConfig();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    $('batchAll').addEventListener('click', async () => {
+      try {
+        toast('正在批量签到...');
+        await api('/api/signin/batch', { method: 'POST', body: JSON.stringify({ only_enabled: true }) });
+        toast('批量签到完成');
+        await Promise.all([loadOverview(), loadHistory()]);
+      } catch (err) {
+        toast(err.message, true);
+        await Promise.all([loadOverview(), loadHistory()]);
+      }
+    });
+
+    $('logoutBtn').addEventListener('click', async () => {
+      await api('/api/logout');
+      location.reload();
+    });
+    $('refreshOverview').addEventListener('click', loadOverview);
+    $('refreshHistory').addEventListener('click', loadHistory);
+    $('accountFilter').addEventListener('change', loadAccounts);
+    $('historyPlatform').addEventListener('change', loadHistory);
+    $('newAccount').addEventListener('click', resetAccountForm);
+    $('resetAccountForm').addEventListener('click', resetAccountForm);
+
+    document.querySelectorAll('[data-tab]').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+
+    function switchTab(tab) {
+      document.querySelectorAll('[data-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tab));
+      for (const el of document.querySelectorAll('main > section')) el.classList.add('hidden');
+      $('tab-' + tab).classList.remove('hidden');
+    }
+
+    function escapeHtml(v) {
+      return String(v ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
+    }
+
+    boot();
+  </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+data/
+/signin-app
+signin-app.exe
+*.db
+*.db-shm
+*.db-wal

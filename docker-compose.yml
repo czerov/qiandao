@@ -1,0 +1,16 @@
+services:
+  signin-app:
+    build: .
+    image: signin-app:latest
+    container_name: signin-app
+    restart: unless-stopped
+    ports:
+      - "4567:4567"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - SIGNIN_ADDR=:4567
+      - SIGNIN_DB=/app/data/signin.db
+      - SIGNIN_WEB_USERNAME=admin
+      - SIGNIN_WEB_PASSWORD=admin
