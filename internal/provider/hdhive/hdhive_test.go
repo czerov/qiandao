@@ -31,3 +31,23 @@ func TestHDHiveLoginActionPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageFromNextActionBody(t *testing.T) {
+	body := []byte("0:{\"a\":\"$@1\",\"f\":\"\",\"b\":\"build\",\"q\":\"\",\"i\":false}\n1:{\"error\":{\"success\":false,\"message\":\"用户名或密码错误\",\"code\":\"401\",\"internal_detail\":\"用户名或密码错误\"}}\n")
+	if got := messageFromBody(body, "fallback"); got != "用户名或密码错误" {
+		t.Fatalf("messageFromBody() = %q, want %q", got, "用户名或密码错误")
+	}
+	if likelySuccess(body) {
+		t.Fatal("likelySuccess() = true, want false")
+	}
+}
+
+func TestMessageFromNestedError(t *testing.T) {
+	body := []byte(`{"error":{"message":"需要额外验证","code":"403"}}`)
+	if got := messageFromBody(body, "fallback"); got != "需要额外验证" {
+		t.Fatalf("messageFromBody() = %q, want %q", got, "需要额外验证")
+	}
+	if likelySuccess(body) {
+		t.Fatal("likelySuccess() = true, want false")
+	}
+}

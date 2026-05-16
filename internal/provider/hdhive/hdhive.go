@@ -190,8 +190,11 @@ func doJSONRequest(ctx context.Context, client *http.Client, method, rawURL stri
 
 func login(ctx context.Context, client *http.Client, baseURL, username, password string) error {
 	_, _, _ = doJSONRequest(ctx, client, http.MethodGet, httpx.JoinURL(baseURL, "/login"), nil, nil)
+	var meaningfulErr error
 	if err := tryHdhiveLoginAction(ctx, client, baseURL, username, password); err == nil {
 		return nil
+	} else if isMeaningfulLoginError(err) {
+		meaningfulErr = err
 	}
 	jsonPayloads := []map[string]string{
 		{"username": username, "password": password},
@@ -199,12 +202,16 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 		{"email": username, "password": password},
 		{"name": username, "password": password},
 	}
+	var lastErr error
+	var lastBody []byte
+	var lastStatus int
 	for _, endpoint := range []string{"/api/login", "/api/auth/login", "/api/user/login"} {
 		for _, payload := range jsonPayloads {
 			body, status, err := doJSONRequest(ctx, client, http.MethodPost, httpx.JoinURL(baseURL, endpoint), payload, nil)
 			if err == nil && status < 400 && likelySuccess(body) {
 				return nil
 			}
+			rememberAttempt(&lastBody, &lastStatus, &lastErr, body, status, err)
 		}
 	}
 	form := url.Values{}
@@ -216,9 +223,25 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 		if err == nil && status < 400 && likelySuccess(body) {
 			return nil
 		}
+		rememberAttempt(&lastBody, &lastStatus, &lastErr, body, status, err)
 	}
 	if err := tryNextAction(ctx, client, baseURL, []string{"login", "signIn"}, fmt.Sprintf(`["%s","%s"]`, escapeJSONString(username), escapeJSONString(password))); err == nil {
 		return nil
+	} else if meaningfulErr == nil && isMeaningfulLoginError(err) {
+		meaningfulErr = err
+	}
+	if meaningfulErr != nil {
+		return fmt.Errorf("影巢网页登录失败: %w", meaningfulErr)
+	}
+	if len(lastBody) > 0 {
+		msg := messageFromBody(lastBody, "影巢网页登录失败")
+		if lastStatus > 0 {
+			return fmt.Errorf("%s (HTTP %d)", msg, lastStatus)
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("影巢网页登录失败: %w", lastErr)
 	}
 	return fmt.Errorf("影巢网页登录失败，请检查账号密码、Cookie 或站点是否需要额外验证")
 }
@@ -234,7 +257,7 @@ func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, use
 		return err
 	}
 	if status >= 400 || !likelySuccess(body) {
-		return fmt.Errorf("影巢登录 action 返回失败")
+		return fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "影巢登录 action 返回失败"), status)
 	}
 	return nil
 }
@@ -317,9 +340,37 @@ func tryNextAction(ctx context.Context, client *http.Client, baseURL string, nam
 		return err
 	}
 	if status >= 400 || !likelySuccess(body) {
-		return fmt.Errorf("Server Action 返回失败")
+		return fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "Server Action 返回失败"), status)
 	}
 	return nil
+}
+
+func rememberAttempt(lastBody *[]byte, lastStatus *int, lastErr *error, body []byte, status int, err error) {
+	if err != nil {
+		*lastErr = err
+		return
+	}
+	if len(body) == 0 {
+		return
+	}
+	msg := messageFromBody(body, "")
+	if msg == "" && !looksLikeNotFound(status, body) {
+		msg = firstLine(string(body))
+	}
+	if msg != "" {
+		*lastBody = body
+		*lastStatus = status
+	}
+}
+
+func isMeaningfulLoginError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return containsAny(err.Error(), []string{
+		"用户名", "账号", "邮箱", "密码", "验证", "验证码", "过期", "禁用", "频繁",
+		"401", "403", "too many", "unauthorized", "forbidden",
+	})
 }
 
 func discoverActionID(ctx context.Context, client *http.Client, baseURL string, names []string) (string, error) {
@@ -467,6 +518,25 @@ func unwrapData(obj map[string]any) map[string]any {
 }
 
 func successFromMap(obj map[string]any, fallback bool) bool {
+	if v, ok := obj["error"]; ok {
+		switch x := v.(type) {
+		case nil:
+		case bool:
+			if x {
+				return false
+			}
+		case string:
+			if strings.TrimSpace(x) != "" {
+				return false
+			}
+		case map[string]any:
+			if len(x) > 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
 	for _, key := range []string{"success", "ok"} {
 		if v, ok := obj[key].(bool); ok {
 			return v
@@ -494,10 +564,58 @@ func messageFromMap(obj map[string]any, fallback string) string {
 	if msg != "" {
 		return msg
 	}
+	for _, key := range []string{"error", "data", "result"} {
+		if child, ok := obj[key].(map[string]any); ok {
+			if msg := messageFromMap(child, ""); msg != "" {
+				return msg
+			}
+		}
+	}
 	if data, ok := obj["data"].(string); ok && data != "" {
 		return data
 	}
 	return fallback
+}
+
+func messageFromBody(raw []byte, fallback string) string {
+	if len(raw) == 0 {
+		return fallback
+	}
+	obj := map[string]any{}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return messageFromMap(obj, fallback)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if idx := strings.IndexByte(line, ':'); idx > 0 && looksLikeFramePrefix(line[:idx]) {
+			line = strings.TrimSpace(line[idx+1:])
+		}
+		obj := map[string]any{}
+		if err := json.Unmarshal([]byte(line), &obj); err == nil {
+			if msg := messageFromMap(obj, ""); msg != "" {
+				return msg
+			}
+		}
+	}
+	if msg := firstLine(string(raw)); msg != "" {
+		return msg
+	}
+	return fallback
+}
+
+func looksLikeFramePrefix(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func stringValue(obj map[string]any, keys ...string) string {
@@ -544,7 +662,7 @@ func likelySuccess(raw []byte) bool {
 		return true
 	}
 	text := strings.ToLower(string(raw))
-	if containsAny(text, []string{"invalid", "unauthorized", "forbidden", "failed", "失败", "错误", "密码错误", "不正确", "不存在", "too many"}) {
+	if containsAny(text, []string{"\"success\":false", "\"ok\":false", "invalid", "unauthorized", "forbidden", "failed", "失败", "错误", "密码错误", "不正确", "不存在", "too many"}) {
 		return false
 	}
 	obj := map[string]any{}
