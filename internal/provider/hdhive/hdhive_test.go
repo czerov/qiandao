@@ -1,6 +1,9 @@
 package hdhive
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -49,5 +52,53 @@ func TestMessageFromNestedError(t *testing.T) {
 	}
 	if likelySuccess(body) {
 		t.Fatal("likelySuccess() = true, want false")
+	}
+}
+
+func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
+	var sawActionHeaders bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<script src="/chunk.js"></script>`))
+		case "/login":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`<script src="/chunk.js"></script>`))
+				return
+			}
+			sawActionHeaders = r.Header.Get("Next-Action") == hdhiveLoginActionFallback &&
+				r.Header.Get("Next-Router-State-Tree") == hdhiveLoginRouterStateTree &&
+				r.Header.Get("x-nextjs-post") == "1"
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
+			w.WriteHeader(http.StatusSeeOther)
+		case "/chunk.js":
+			_, _ = w.Write([]byte(`let d=(0,s.createServerReference)("` + hdhiveLoginActionFallback + `",s.callServer,void 0,s.findSourceMapURL,"login");`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := srv.Client()
+	if err := login(context.Background(), client, srv.URL, "user@example.com", "password123"); err != nil {
+		t.Fatalf("login returned error: %v", err)
+	}
+	if !sawActionHeaders {
+		t.Fatal("login action did not include HDHive browser-compatible action headers")
+	}
+	if got := authCookieString(client, srv.URL); !strings.Contains(got, "session=ok") {
+		t.Fatalf("authCookieString() = %q, want session cookie", got)
+	}
+}
+
+func TestParseCookiePairsSkipsAttributes(t *testing.T) {
+	cookies := parseCookiePairs("session=abc; Path=/; HttpOnly; SameSite=Lax; csrftoken=def")
+	var names []string
+	for _, cookie := range cookies {
+		names = append(names, cookie.Name)
+	}
+	got := strings.Join(names, ",")
+	if got != "session,csrftoken" {
+		t.Fatalf("cookie names = %q, want session,csrftoken", got)
 	}
 }

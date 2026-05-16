@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -20,6 +21,15 @@ import (
 )
 
 type Provider struct{}
+
+const (
+	hdhiveBrowserUA             = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+	hdhiveLoginActionFallback   = "6068df40ea98050274d29084c0083d1712cc19e909"
+	hdhiveDugouActionFallback   = "f30185aabded8ca281fe911b11b1dbdba999fa1f"
+	hdhiveLoginRouterStateTree  = `%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%5D%7D%5D%7D%5D`
+	hdhiveAppRouterStateTree    = `%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2F%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D`
+	hdhiveMaxActionChunkFetches = 30
+)
 
 func New() *Provider {
 	return &Provider{}
@@ -135,6 +145,7 @@ func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, se
 	result.Platform = domain.PlatformHDHive
 	result.AccountID = account.ID
 	result.AccountName = account.DisplayName()
+	mergeHDHiveWebResult(&result, body, account.Options.Dog)
 	if account.Options.Dog {
 		result.Mode = "赌狗抽签"
 	} else {
@@ -168,7 +179,7 @@ func doJSONRequest(ctx context.Context, client *http.Client, method, rawURL stri
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
+	req.Header.Set("User-Agent", hdhiveBrowserUA)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -189,9 +200,27 @@ func doJSONRequest(ctx context.Context, client *http.Client, method, rawURL stri
 }
 
 func login(ctx context.Context, client *http.Client, baseURL, username, password string) error {
-	_, _, _ = doJSONRequest(ctx, client, http.MethodGet, httpx.JoinURL(baseURL, "/login"), nil, nil)
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username == "" || password == "" {
+		return fmt.Errorf("影巢网页登录需要账号密码")
+	}
+	if password == domain.MaskValue {
+		return fmt.Errorf("影巢账号密码仍是掩码，请重新输入密码并保存")
+	}
+	jar, _ := cookiejar.New(nil)
+	client.Jar = jar
+	_, _ = fetchHDHiveText(ctx, client, baseURL, "/", "")
+	loginPageBody, _ := fetchHDHiveText(ctx, client, baseURL, "/login", baseURL)
+	originalCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	defer func() {
+		client.CheckRedirect = originalCheckRedirect
+	}()
 	var meaningfulErr error
-	if err := tryHdhiveLoginAction(ctx, client, baseURL, username, password); err == nil {
+	if err := tryHdhiveLoginAction(ctx, client, baseURL, loginPageBody, username, password); err == nil {
 		return nil
 	} else if isMeaningfulLoginError(err) {
 		meaningfulErr = err
@@ -225,7 +254,7 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 		}
 		rememberAttempt(&lastBody, &lastStatus, &lastErr, body, status, err)
 	}
-	if err := tryNextAction(ctx, client, baseURL, []string{"login", "signIn"}, fmt.Sprintf(`["%s","%s"]`, escapeJSONString(username), escapeJSONString(password))); err == nil {
+	if err := tryNextAction(ctx, client, baseURL, []string{"login", "signIn"}, fmt.Sprintf(`["%s","%s"]`, escapeJSONString(username), escapeJSONString(password)), "/login", loginPageBody); err == nil {
 		return nil
 	} else if meaningfulErr == nil && isMeaningfulLoginError(err) {
 		meaningfulErr = err
@@ -246,18 +275,22 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 	return fmt.Errorf("影巢网页登录失败，请检查账号密码、Cookie 或站点是否需要额外验证")
 }
 
-func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, username, password string) error {
+func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, pageBody, username, password string) error {
 	payload := nextActionPayload(map[string]string{
 		"username":           username,
 		"password":           encodePassword(password),
 		"password_transport": "base64",
 	}, "/")
-	body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload)
+	body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload, "/login", pageBody)
 	if err != nil {
 		return err
 	}
 	if status >= 400 || !likelySuccess(body) {
 		return fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "影巢登录 action 返回失败"), status)
+	}
+	if authCookieString(client, baseURL) == "" {
+		msg := messageFromBody(body, "auth cookies not found")
+		return fmt.Errorf("%s (HTTP %d)", msg, status)
 	}
 	return nil
 }
@@ -274,9 +307,15 @@ func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bo
 	if dog {
 		actionPayload = "[true]"
 	}
-	body, status, err := postNextAction(ctx, client, baseURL, []string{"checkIn", "checkin", "signIn", "signin"}, actionPayload)
+	body, status, err := postNextAction(ctx, client, baseURL, []string{"checkIn", "checkin", "signIn", "signin"}, actionPayload, "/", "")
 	if err == nil {
 		return body, status, nil
+	}
+	if dog {
+		body, status, dogErr := postNextAction(ctx, client, baseURL, []string{"checkIn"}, "[null]", "/", "", hdhiveDugouActionFallback)
+		if dogErr == nil {
+			return body, status, nil
+		}
 	}
 	return nil, 0, err
 }
@@ -286,7 +325,7 @@ func doFormRequest(ctx context.Context, client *http.Client, rawURL string, form
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
+	req.Header.Set("User-Agent", hdhiveBrowserUA)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if decorate != nil {
@@ -304,38 +343,49 @@ func doFormRequest(ctx context.Context, client *http.Client, rawURL string, form
 	return raw, resp.StatusCode, nil
 }
 
-func postNextAction(ctx context.Context, client *http.Client, baseURL string, names []string, payload string) ([]byte, int, error) {
-	id, err := discoverActionID(ctx, client, baseURL, names)
-	if err != nil {
-		return nil, 0, err
+func postNextAction(ctx context.Context, client *http.Client, baseURL string, names []string, payload string, pagePath string, pageBody string, fallbacks ...string) ([]byte, int, error) {
+	ids := actionIDCandidates(ctx, client, baseURL, names, pagePath, pageBody, fallbacks...)
+	if len(ids) == 0 {
+		return nil, 0, fmt.Errorf("未发现 Next.js Server Action ID")
 	}
+	var lastBody []byte
+	var lastStatus int
+	var lastErr error
 	for _, endpoint := range actionEndpoints(names) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, httpx.JoinURL(baseURL, endpoint), strings.NewReader(payload))
-		if err != nil {
-			return nil, 0, err
+		for _, id := range ids {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, httpx.JoinURL(baseURL, endpoint), strings.NewReader(payload))
+			if err != nil {
+				return nil, 0, err
+			}
+			setNextActionHeaders(req, baseURL, endpoint, id, names)
+			resp, err := client.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+			lastBody, lastStatus = raw, resp.StatusCode
+			if resp.StatusCode < 500 && !looksLikeNotFound(resp.StatusCode, raw) {
+				return raw, resp.StatusCode, nil
+			}
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
-		req.Header.Set("Accept", "text/x-component")
-		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
-		req.Header.Set("Next-Action", id)
-		req.Header.Set("Next-Url", endpoint)
-		req.Header.Set("Origin", strings.TrimRight(baseURL, "/"))
-		req.Header.Set("Referer", httpx.JoinURL(baseURL, endpoint))
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		_ = resp.Body.Close()
-		if readErr == nil && resp.StatusCode < 500 && !looksLikeNotFound(resp.StatusCode, raw) {
-			return raw, resp.StatusCode, nil
-		}
+	}
+	if len(lastBody) > 0 {
+		return lastBody, lastStatus, fmt.Errorf("%s (HTTP %d)", messageFromBody(lastBody, "影巢 Server Action 调用失败"), lastStatus)
+	}
+	if lastErr != nil {
+		return nil, 0, lastErr
 	}
 	return nil, 0, fmt.Errorf("影巢 Server Action 调用失败")
 }
 
-func tryNextAction(ctx context.Context, client *http.Client, baseURL string, names []string, payload string) error {
-	body, status, err := postNextAction(ctx, client, baseURL, names, payload)
+func tryNextAction(ctx context.Context, client *http.Client, baseURL string, names []string, payload string, pagePath string, pageBody string, fallbacks ...string) error {
+	body, status, err := postNextAction(ctx, client, baseURL, names, payload, pagePath, pageBody, fallbacks...)
 	if err != nil {
 		return err
 	}
@@ -343,6 +393,31 @@ func tryNextAction(ctx context.Context, client *http.Client, baseURL string, nam
 		return fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "Server Action 返回失败"), status)
 	}
 	return nil
+}
+
+func setNextActionHeaders(req *http.Request, baseURL, endpoint, actionID string, names []string) {
+	req.Header.Set("User-Agent", hdhiveBrowserUA)
+	req.Header.Set("Accept", "text/x-component")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	req.Header.Set("Next-Action", actionID)
+	req.Header.Set("Next-Url", endpoint)
+	req.Header.Set("Origin", strings.TrimRight(baseURL, "/"))
+	req.Header.Set("Referer", httpx.JoinURL(baseURL, endpoint))
+	req.Header.Set("Priority", "u=1, i")
+	req.Header.Set("Sec-CH-UA", `"Google Chrome";v="147", "Not=A?Brand";v="8", "Chromium";v="147"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("x-nextjs-post", "1")
+	if isLoginAction(names) {
+		req.Header.Set("Next-Router-State-Tree", hdhiveLoginRouterStateTree)
+		req.Header.Set("DNT", "1")
+		return
+	}
+	req.Header.Set("Next-Router-State-Tree", hdhiveAppRouterStateTree)
 }
 
 func rememberAttempt(lastBody *[]byte, lastStatus *int, lastErr *error, body []byte, status int, err error) {
@@ -373,26 +448,52 @@ func isMeaningfulLoginError(err error) bool {
 	})
 }
 
-func discoverActionID(ctx context.Context, client *http.Client, baseURL string, names []string) (string, error) {
+func actionIDCandidates(ctx context.Context, client *http.Client, baseURL string, names []string, pagePath string, pageBody string, fallbacks ...string) []string {
+	var out []string
+	if id, err := discoverActionID(ctx, client, baseURL, names, pagePath, pageBody); err == nil && id != "" {
+		out = appendUniqueString(out, id)
+	}
+	if isLoginAction(names) {
+		out = appendUniqueString(out, hdhiveLoginActionFallback)
+	}
+	for _, fallback := range fallbacks {
+		out = appendUniqueString(out, fallback)
+	}
+	return out
+}
+
+func discoverActionID(ctx context.Context, client *http.Client, baseURL string, names []string, pagePath string, pageBody string) (string, error) {
 	var blobs []string
 	var scripts []string
-	for _, page := range []string{"/", "/login", "/user", "/dashboard"} {
-		body, status, err := doJSONRequest(ctx, client, http.MethodGet, httpx.JoinURL(baseURL, page), nil, nil)
-		if err == nil && status < 400 {
-			text := string(body)
-			blobs = append(blobs, text)
-			scripts = append(scripts, scriptSources(text)...)
+	if pageBody != "" {
+		blobs = append(blobs, pageBody)
+		scripts = append(scripts, scriptSources(pageBody)...)
+	}
+	pages := []string{"/", "/login", "/user", "/dashboard"}
+	if strings.TrimSpace(pagePath) != "" {
+		pages = append([]string{pagePath}, pages...)
+	}
+	seenPages := map[string]bool{}
+	for _, page := range pages {
+		if seenPages[page] {
+			continue
+		}
+		seenPages[page] = true
+		body, err := fetchHDHiveText(ctx, client, baseURL, page, "")
+		if err == nil {
+			blobs = append(blobs, body)
+			scripts = append(scripts, scriptSources(body)...)
 		}
 	}
 	seen := map[string]bool{}
 	for _, src := range scripts {
-		if seen[src] || len(seen) > 12 {
+		if seen[src] || len(seen) > hdhiveMaxActionChunkFetches {
 			continue
 		}
 		seen[src] = true
-		body, status, err := doJSONRequest(ctx, client, http.MethodGet, httpx.JoinURL(baseURL, src), nil, nil)
-		if err == nil && status < 400 {
-			blobs = append(blobs, string(body))
+		body, err := fetchHDHiveText(ctx, client, baseURL, src, httpx.JoinURL(baseURL, nonEmptyPath(pagePath, "/")))
+		if err == nil {
+			blobs = append(blobs, body)
 		}
 	}
 	for _, blob := range blobs {
@@ -401,6 +502,53 @@ func discoverActionID(ctx context.Context, client *http.Client, baseURL string, 
 		}
 	}
 	return "", fmt.Errorf("未发现 Next.js Server Action ID")
+}
+
+func fetchHDHiveText(ctx context.Context, client *http.Client, baseURL string, pathOrURL string, referer string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(baseURL, pathOrURL), nil)
+	if err != nil {
+		return "", err
+	}
+	setHDHiveFetchHeaders(req, pathOrURL, referer)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func setHDHiveFetchHeaders(req *http.Request, pathOrURL string, referer string) {
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Sec-CH-UA", `"Google Chrome";v="147", "Not=A?Brand";v="8", "Chromium";v="147"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	if strings.HasSuffix(strings.ToLower(pathOrURL), ".js") {
+		req.Header.Set("Sec-Fetch-Dest", "script")
+		req.Header.Set("Sec-Fetch-Mode", "no-cors")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	} else {
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+		req.Header.Set("Sec-Fetch-Dest", "document")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Site", "none")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
+	}
+	req.Header.Set("User-Agent", hdhiveBrowserUA)
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
 }
 
 func scriptSources(html string) []string {
@@ -419,6 +567,8 @@ func findActionID(blob string, names []string) string {
 	for _, name := range names {
 		quoted := regexp.QuoteMeta(name)
 		patterns := []string{
+			`(?is)createServerReference\)?\(["']([a-f0-9]{32,80})["'][^)]{0,500}["']` + quoted + `["']\)?`,
+			`(?is)["']([a-f0-9]{32,80})["'][^)]{0,500}findSourceMapURL,["']` + quoted + `["']\)?`,
 			`(?is)createServerReference\(["']([a-f0-9]{32,80})["'][^)]*["']` + quoted + `["']`,
 			`(?is)` + quoted + `.{0,400}?["']([a-f0-9]{32,80})["']`,
 			`(?is)["']([a-f0-9]{32,80})["'].{0,400}?` + quoted,
@@ -428,6 +578,32 @@ func findActionID(blob string, names []string) string {
 			if m := re.FindStringSubmatch(blob); len(m) > 1 {
 				return m[1]
 			}
+		}
+		needle := `"` + name + `"`
+		searchFrom := 0
+		idRe := regexp.MustCompile(`[a-f0-9]{32,80}`)
+		for {
+			relativeIdx := strings.Index(blob[searchFrom:], needle)
+			if relativeIdx < 0 {
+				break
+			}
+			idx := searchFrom + relativeIdx
+			start := idx - 700
+			if start < 0 {
+				start = 0
+			}
+			end := idx + len(needle) + 120
+			if end > len(blob) {
+				end = len(blob)
+			}
+			context := blob[start:end]
+			if strings.Contains(context, "createServerReference") {
+				ids := idRe.FindAllString(blob[start:idx], -1)
+				if len(ids) > 0 {
+					return ids[len(ids)-1]
+				}
+			}
+			searchFrom = idx + len(needle)
 		}
 	}
 	return ""
@@ -484,6 +660,90 @@ func mergeHDHiveMe(result *domain.SignInResult, raw []byte) {
 	}
 	if meta, ok := src["user_meta"].(map[string]any); ok {
 		mergeUserFields(result, meta)
+	}
+}
+
+func mergeHDHiveWebResult(result *domain.SignInResult, raw []byte, dog bool) {
+	body := unescapeUnicode(string(raw))
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	if msg := parseHDHiveWebCheckinMessage(body, dog); msg != "" {
+		result.Message = msg
+	}
+	if result.RewardPoints == 0 {
+		result.RewardPoints = intFromString(findValEnhanced(body, []string{
+			`(?i)"gained_points":\s*([+-]?\d+)`,
+			`(?i)"gained":\s*([+-]?\d+)`,
+			`(?i)"points_delta":\s*([+-]?\d+)`,
+			`签到成功[^"<>]{0,80}?获得\s*([+-]?\d+)\s*积分`,
+			`签到[^"<>]{0,120}?获得\s*([+-]?\d+)\s*积分`,
+			`获得积分\s*[:：]?\s*([+-]?\d+)`,
+			`获得\s*([+-]?\d+)\s*积分`,
+		}))
+	}
+	if result.TotalPoints == 0 {
+		result.TotalPoints = intFromString(findValEnhanced(body, []string{
+			`(?i)"user_meta":\s*\{[^{}]*"points":\s*(-?\d+)`,
+			`(?i)"total_points":\s*(-?\d+)`,
+			`(?i)"points":\s*(\d{4,})`,
+			`(?s)积分.*?>(\d+)`,
+		}))
+	}
+	if result.SigninDays == 0 {
+		result.SigninDays = intFromString(findValEnhanced(body, []string{
+			`(?i)"signin_days_total":\s*(\d+)`,
+			`(?i)"signin_days":\s*(\d+)`,
+			`(?i)"days":\s*(\d+)`,
+			`签到天数.*?(\d+)`,
+			`连续签到.*?(\d+)`,
+		}))
+	}
+	if result.Nickname == "" {
+		result.Nickname = findValEnhanced(body, []string{
+			`class="nickname"[^>]*>([^<]+)`,
+			`Hi,\s*([^<!\s]+)`,
+			`"nickname":"([^"]+)"`,
+			`"first_name":"([^"]+)"`,
+			`"full_name":"([^"]+)"`,
+			`昵称[:\s]{1,10}([^<!\s]+)`,
+		})
+	}
+	if containsAny(body, []string{"\"success\":false", "失败", "错误", "error", "failed"}) && !containsAny(body, []string{"已经签到", "今日已参与", "already signed"}) {
+		result.Success = false
+	}
+}
+
+func parseHDHiveWebCheckinMessage(body string, dog bool) string {
+	explicitMsg := findValEnhanced(body, []string{
+		`"description":"([^"]+)"`,
+		`"message":"([^"]+)"`,
+		`"error":"([^"]+)"`,
+	})
+	switch {
+	case strings.Contains(body, "已经签到") || strings.Contains(body, "already signed") || strings.Contains(body, "签到过了"):
+		if dog {
+			return "赌狗抽签: 今日已参与"
+		}
+		return "今日已签到"
+	case strings.Contains(body, "不要贪心") || strings.Contains(body, "今日已参与") || strings.Contains(body, "已经参与"):
+		return "赌狗抽签: 今日已参与"
+	case strings.Contains(body, `"success":true`) || strings.Contains(body, `"points":`) || strings.Contains(body, "签到成功") || strings.Contains(body, "成功"):
+		if explicitMsg != "" {
+			if dog && !strings.Contains(explicitMsg, "赌狗") {
+				return "赌狗抽签: " + explicitMsg
+			}
+			return explicitMsg
+		}
+		if dog {
+			return "赌狗抽签: 成功获得奖励"
+		}
+		return "签到成功"
+	default:
+		if explicitMsg != "" {
+			return explicitMsg
+		}
+		return ""
 	}
 }
 
@@ -657,6 +917,22 @@ func intValue(obj map[string]any, keys ...string) int {
 	return 0
 }
 
+func intFromString(raw string) int {
+	raw = strings.TrimSpace(strings.TrimPrefix(raw, "+"))
+	v, _ := strconv.Atoi(raw)
+	return v
+}
+
+func findValEnhanced(source string, patterns []string) string {
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if m := re.FindStringSubmatch(source); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	return ""
+}
+
 func likelySuccess(raw []byte) bool {
 	if len(raw) == 0 {
 		return true
@@ -690,6 +966,15 @@ func containsAny(s string, needles []string) bool {
 	return false
 }
 
+func unescapeUnicode(s string) string {
+	re := regexp.MustCompile(`\\u[0-9a-fA-F]{4}`)
+	s = re.ReplaceAllStringFunc(s, func(m string) string {
+		r, _ := strconv.ParseInt(m[2:], 16, 32)
+		return string(rune(r))
+	})
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
+
 func compactRaw(raw []byte) string {
 	text := strings.TrimSpace(string(raw))
 	if len(text) > 4000 {
@@ -717,10 +1002,54 @@ func escapeJSONString(s string) string {
 func actionEndpoints(names []string) []string {
 	for _, name := range names {
 		if strings.Contains(strings.ToLower(name), "login") {
-			return []string{"/login", "/", "/user", "/dashboard"}
+			return []string{"/login", "/"}
 		}
 	}
 	return []string{"/", "/login", "/user", "/dashboard"}
+}
+
+func isLoginAction(names []string) bool {
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), "login") {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func nonEmptyPath(path, fallback string) string {
+	if strings.TrimSpace(path) == "" {
+		return fallback
+	}
+	return path
+}
+
+func joinURL(baseURL, pathOrURL string) string {
+	if strings.HasPrefix(pathOrURL, "http://") || strings.HasPrefix(pathOrURL, "https://") {
+		return pathOrURL
+	}
+	base, err := url.Parse(strings.TrimRight(baseURL, "/") + "/")
+	if err != nil {
+		return httpx.JoinURL(baseURL, pathOrURL)
+	}
+	ref, err := url.Parse(pathOrURL)
+	if err != nil {
+		return httpx.JoinURL(baseURL, pathOrURL)
+	}
+	return base.ResolveReference(ref).String()
 }
 
 func encodePassword(s string) string {
@@ -754,20 +1083,7 @@ func setCookieHeader(client *http.Client, base *url.URL, raw string) {
 	if client.Jar == nil || base == nil {
 		return
 	}
-	var cookies []*http.Cookie
-	for _, part := range strings.Split(raw, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" || !strings.Contains(part, "=") {
-			continue
-		}
-		name, value, _ := strings.Cut(part, "=")
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		cookies = append(cookies, &http.Cookie{Name: name, Value: strings.TrimSpace(value), Path: "/"})
-	}
-	client.Jar.SetCookies(base, cookies)
+	client.Jar.SetCookies(base, parseCookiePairs(raw))
 }
 
 func cookieString(client *http.Client, base *url.URL) string {
@@ -779,6 +1095,42 @@ func cookieString(client *http.Client, base *url.URL) string {
 		parts = append(parts, c.Name+"="+c.Value)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func authCookieString(client *http.Client, baseURL string) string {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return cookieString(client, base)
+}
+
+func parseCookiePairs(raw string) []*http.Cookie {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	attributeNames := map[string]struct{}{
+		"path": {}, "domain": {}, "expires": {}, "max-age": {}, "samesite": {}, "priority": {}, "secure": {}, "httponly": {},
+	}
+	var cookies []*http.Cookie
+	for _, part := range strings.Split(raw, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" || !strings.Contains(part, "=") {
+			continue
+		}
+		name, value, _ := strings.Cut(part, "=")
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		if _, isAttr := attributeNames[strings.ToLower(name)]; isAttr {
+			continue
+		}
+		cookies = append(cookies, &http.Cookie{Name: name, Value: value, Path: "/"})
+	}
+	return cookies
 }
 
 func credentialPatch(account domain.Account, client *http.Client, base *url.URL) *domain.AccountCredential {
