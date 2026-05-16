@@ -147,6 +147,7 @@ func (c *client) login(ctx context.Context, username, password string) error {
 	}
 	var lastBody []byte
 	var lastStatus int
+	var lastErr error
 	for _, payload := range payloads {
 		body, status, err := c.request(ctx, http.MethodPost, "/api/app/login/", payload)
 		if err == nil {
@@ -157,6 +158,8 @@ func (c *client) login(ctx context.Context, username, password string) error {
 				}
 				return nil
 			}
+		} else {
+			lastErr = err
 		}
 	}
 	form := url.Values{}
@@ -171,6 +174,8 @@ func (c *client) login(ctx context.Context, username, password string) error {
 			}
 			return nil
 		}
+	} else {
+		lastErr = err
 	}
 	msg := "聚影登录失败"
 	if len(lastBody) > 0 {
@@ -178,6 +183,8 @@ func (c *client) login(ctx context.Context, username, password string) error {
 	}
 	if lastStatus > 0 {
 		msg = fmt.Sprintf("%s (HTTP %d)", msg, lastStatus)
+	} else if lastErr != nil {
+		msg = fmt.Sprintf("%s: %v", msg, lastErr)
 	}
 	return fmt.Errorf("%s", msg)
 }
@@ -212,8 +219,7 @@ func (c *client) request(ctx context.Context, method, path string, payload any) 
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
+	c.setBrowserHeaders(req)
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -239,8 +245,7 @@ func (c *client) form(ctx context.Context, path string, form url.Values) ([]byte
 	if err != nil {
 		return nil, 0, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
+	c.setBrowserHeaders(req)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	for k, v := range c.headers {
 		if strings.TrimSpace(v) != "" {
@@ -257,6 +262,16 @@ func (c *client) form(ctx context.Context, path string, form url.Values) ([]byte
 		return nil, 0, err
 	}
 	return raw, resp.StatusCode, nil
+}
+
+func (c *client) setBrowserHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	if base, err := url.Parse(c.baseURL); err == nil {
+		req.Header.Set("Origin", base.Scheme+"://"+base.Host)
+		req.Header.Set("Referer", httpx.JoinURL(c.baseURL, "/login"))
+	}
 }
 
 func (c *client) setCookie(raw string) {
