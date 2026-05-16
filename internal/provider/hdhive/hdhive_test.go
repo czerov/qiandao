@@ -55,6 +55,38 @@ func TestMessageFromNestedError(t *testing.T) {
 	}
 }
 
+func TestMessageFromHTMLUsesFallback(t *testing.T) {
+	body := []byte(`<!DOCTYPE html><html lang="zh-Hans"><head><title>404</title></head></html>`)
+	if got := messageFromBody(body, "影巢 Server Action 调用失败"); got != "影巢 Server Action 调用失败" {
+		t.Fatalf("messageFromBody() = %q, want fallback", got)
+	}
+}
+
+func TestPostNextActionNotFoundReturnsReadableError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`let d=(0,s.createServerReference)("11111111111111111111111111111111",s.callServer,void 0,s.findSourceMapURL,"checkIn");`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`<!DOCTYPE html><html lang="zh-Hans"><head><title>404</title></head></html>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	_, _, err := postNextAction(context.Background(), srv.Client(), srv.URL, []string{"checkIn"}, "[false]", "/", "")
+	if err == nil {
+		t.Fatal("postNextAction returned nil error")
+	}
+	if got := err.Error(); strings.Contains(got, "<!DOCTYPE html>") || !strings.Contains(got, "Action 已失效") {
+		t.Fatalf("postNextAction error = %q, want readable action error without HTML", got)
+	}
+}
+
 func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 	var sawActionHeaders bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

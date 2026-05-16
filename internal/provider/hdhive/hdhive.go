@@ -311,6 +311,9 @@ func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bo
 	if err == nil {
 		return body, status, nil
 	}
+	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusGone {
+		err = fmt.Errorf("影巢签到失败 (HTTP %d: Action 已失效或站点路由已变更)", status)
+	}
 	if dog {
 		body, status, dogErr := postNextAction(ctx, client, baseURL, []string{"checkIn"}, "[null]", "/", "", hdhiveDugouActionFallback)
 		if dogErr == nil {
@@ -376,6 +379,9 @@ func postNextAction(ctx context.Context, client *http.Client, baseURL string, na
 		}
 	}
 	if len(lastBody) > 0 {
+		if looksLikeNotFound(lastStatus, lastBody) {
+			return nil, lastStatus, fmt.Errorf("影巢 Server Action 调用失败 (HTTP %d: Action 已失效或站点路由已变更)", lastStatus)
+		}
 		return lastBody, lastStatus, fmt.Errorf("%s (HTTP %d)", messageFromBody(lastBody, "影巢 Server Action 调用失败"), lastStatus)
 	}
 	if lastErr != nil {
@@ -841,6 +847,12 @@ func messageFromBody(raw []byte, fallback string) string {
 	if len(raw) == 0 {
 		return fallback
 	}
+	if isHTMLDocument(raw) {
+		if strings.TrimSpace(fallback) != "" {
+			return fallback
+		}
+		return "接口返回 HTML 页面"
+	}
 	obj := map[string]any{}
 	if err := json.Unmarshal(raw, &obj); err == nil {
 		return messageFromMap(obj, fallback)
@@ -864,6 +876,11 @@ func messageFromBody(raw []byte, fallback string) string {
 		return msg
 	}
 	return fallback
+}
+
+func isHTMLDocument(raw []byte) bool {
+	text := strings.TrimSpace(strings.ToLower(string(raw)))
+	return strings.HasPrefix(text, "<!doctype html") || strings.HasPrefix(text, "<html")
 }
 
 func looksLikeFramePrefix(s string) bool {
@@ -1005,7 +1022,7 @@ func actionEndpoints(names []string) []string {
 			return []string{"/login", "/"}
 		}
 	}
-	return []string{"/", "/login", "/user", "/dashboard"}
+	return []string{"/"}
 }
 
 func isLoginAction(names []string) bool {
