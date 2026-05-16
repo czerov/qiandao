@@ -102,3 +102,24 @@ func TestParseCookiePairsSkipsAttributes(t *testing.T) {
 		t.Fatalf("cookie names = %q, want session,csrftoken", got)
 	}
 }
+
+func TestResolveHDHiveSignBaseURLUsesDotCom(t *testing.T) {
+	for _, raw := range []string{
+		"",
+		"https://hdhive.com",
+		"https://hdhive.org",
+		"https://hdhive.online",
+		"hdhive.online",
+	} {
+		if got := resolveHDHiveSignBaseURL(raw); got != "https://hdhive.com" {
+			t.Fatalf("resolveHDHiveSignBaseURL(%q) = %q, want https://hdhive.com", raw, got)
+		}
+	}
+}
+
+func TestHostCandidatesAvoidOfflineMirrors(t *testing.T) {
+	got := strings.Join(hostCandidates("https://hdhive.online"), ",")
+	if got != "https://hdhive.com" {
+		t.Fatalf("hostCandidates() = %q, want only https://hdhive.com", got)
+	}
+}

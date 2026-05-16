@@ -41,7 +41,7 @@ func (p *Provider) Platform() string {
 
 func (p *Provider) SignIn(ctx context.Context, account domain.Account, settings domain.Settings) (provider.Result, error) {
 	settings = settings.WithDefaults()
-	baseURL := httpx.NormalizeBaseURL(settings.Providers.HDHive.BaseURL, "https://hdhive.com")
+	baseURL := resolveHDHiveSignBaseURL(settings.Providers.HDHive.BaseURL)
 	apiKey := strings.TrimSpace(account.Credential.APIKey)
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(settings.Providers.HDHive.GlobalAPIKey)
@@ -1062,21 +1062,31 @@ func nextActionPayload(args ...any) string {
 }
 
 func hostCandidates(baseURL string) []string {
-	baseURL = httpx.NormalizeBaseURL(baseURL, "https://hdhive.com")
+	baseURL = resolveHDHiveSignBaseURL(baseURL)
 	seen := map[string]bool{}
 	var out []string
 	add := func(v string) {
-		v = httpx.NormalizeBaseURL(v, "")
+		v = resolveHDHiveSignBaseURL(v)
 		if v != "" && !seen[v] {
 			seen[v] = true
 			out = append(out, v)
 		}
 	}
 	add(baseURL)
-	for _, host := range []string{"https://hdhive.com", "https://hdhive.org", "https://hdhive.online"} {
-		add(host)
-	}
 	return out
+}
+
+func resolveHDHiveSignBaseURL(raw string) string {
+	raw = httpx.NormalizeBaseURL(raw, "https://hdhive.com")
+	parsed, err := url.Parse(raw)
+	if err != nil || strings.TrimSpace(parsed.Hostname()) == "" {
+		return "https://hdhive.com"
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if strings.HasSuffix(host, "hdhive.com") || strings.HasSuffix(host, "hdhive.org") || strings.HasSuffix(host, "hdhive.online") {
+		return "https://hdhive.com"
+	}
+	return raw
 }
 
 func setCookieHeader(client *http.Client, base *url.URL, raw string) {
