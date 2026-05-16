@@ -93,6 +93,9 @@ func (p *Provider) SignIn(ctx context.Context, account domain.Account, settings 
 }
 
 func resolveProxy(settings domain.Settings) string {
+	if proxyURL := settings.SignInProxyURL(); proxyURL != "" {
+		return proxyURL
+	}
 	mode := strings.TrimSpace(settings.Providers.JuYing.ProxyMode)
 	switch mode {
 	case "custom_proxy":

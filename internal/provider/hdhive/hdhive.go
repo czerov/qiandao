@@ -59,7 +59,7 @@ func (p *Provider) SignIn(ctx context.Context, account domain.Account, settings 
 }
 
 func (p *Provider) openAPISignIn(ctx context.Context, account domain.Account, settings domain.Settings, baseURL, apiKey string) (provider.Result, error) {
-	client, err := httpx.NewClient(settings.Providers.HDHive.ProxyURL, 30*time.Second)
+	client, err := httpx.NewClient(settings.SignInProxyURL(), 30*time.Second)
 	if err != nil {
 		return provider.Result{}, err
 	}
@@ -110,7 +110,7 @@ func (p *Provider) webSignIn(ctx context.Context, account domain.Account, settin
 }
 
 func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, settings domain.Settings, baseURL string) (provider.Result, error) {
-	client, err := httpx.NewClient(settings.Providers.HDHive.ProxyURL, 35*time.Second)
+	client, err := httpx.NewClient(settings.SignInProxyURL(), 35*time.Second)
 	if err != nil {
 		return provider.Result{}, err
 	}

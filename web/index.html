@@ -429,6 +429,7 @@
             <h2>基础</h2>
             <div class="form-grid">
               <label>时区<input id="cfgTimezone" value="Asia/Shanghai"></label>
+              <label>签到代理 URL<input id="cfgProviderProxy" placeholder="http://127.0.0.1:7890"></label>
               <label>控制台用户名<input id="cfgWebUser"></label>
               <label>控制台密码<input id="cfgWebPass" type="password"></label>
               <label>随机延迟秒数<input id="cfgDelay" type="number" min="0" max="600"></label>
@@ -448,7 +449,6 @@
             <div class="form-grid">
               <label>Base URL<input id="cfgHdhiveBase"></label>
               <label>全局 API Key<input id="cfgHdhiveKey"></label>
-              <label class="wide">代理 URL<input id="cfgHdhiveProxy"></label>
             </div>
           </div>
           <div class="panel">
@@ -456,14 +456,6 @@
             <div class="form-grid">
               <label>Base URL<input id="cfgJuyingBase"></label>
               <label>签到路径<input id="cfgJuyingPath"></label>
-              <label>代理模式
-                <select id="cfgJuyingProxyMode">
-                  <option value="direct">direct</option>
-                  <option value="tg_proxy">tg_proxy</option>
-                  <option value="custom_proxy">custom_proxy</option>
-                </select>
-              </label>
-              <label>自定义代理<input id="cfgJuyingProxy"></label>
             </div>
           </div>
         </form>
@@ -603,7 +595,13 @@
     async function loadConfig() {
       const data = await api('/api/config');
       state.config = data;
+      const legacyJuyingProxy = data.providers?.juying?.proxy_mode === 'custom_proxy'
+        ? data.providers?.juying?.proxy_url
+        : data.providers?.juying?.proxy_mode === 'tg_proxy'
+          ? data.notify?.telegram_proxy_url
+          : '';
       $('cfgTimezone').value = data.timezone || 'Asia/Shanghai';
+      $('cfgProviderProxy').value = data.proxy_url || data.providers?.hdhive?.proxy_url || legacyJuyingProxy || '';
       $('cfgWebUser').value = data.web?.username || 'admin';
       $('cfgWebPass').value = data.web?.password || '';
       $('cfgDelay').value = data.scheduler?.random_delay_seconds ?? 15;
@@ -613,11 +611,8 @@
       $('cfgWebhook').value = data.notify?.webhook_url || '';
       $('cfgHdhiveBase').value = data.providers?.hdhive?.base_url || '';
       $('cfgHdhiveKey').value = data.providers?.hdhive?.global_api_key || '';
-      $('cfgHdhiveProxy').value = data.providers?.hdhive?.proxy_url || '';
       $('cfgJuyingBase').value = data.providers?.juying?.base_url || '';
       $('cfgJuyingPath').value = data.providers?.juying?.signin_path || '';
-      $('cfgJuyingProxyMode').value = data.providers?.juying?.proxy_mode || 'direct';
-      $('cfgJuyingProxy').value = data.providers?.juying?.proxy_url || '';
     }
 
     function accountItem(a) {
@@ -786,8 +781,10 @@
     });
 
     $('saveConfig').addEventListener('click', async () => {
+      const providerProxy = $('cfgProviderProxy').value.trim();
       const payload = {
         timezone: $('cfgTimezone').value,
+        proxy_url: providerProxy,
         web: { username: $('cfgWebUser').value, password: $('cfgWebPass').value },
         notify: {
           telegram_bot_token: $('cfgTgToken').value,
@@ -799,13 +796,13 @@
           hdhive: {
             base_url: $('cfgHdhiveBase').value,
             global_api_key: $('cfgHdhiveKey').value,
-            proxy_url: $('cfgHdhiveProxy').value
+            proxy_url: providerProxy
           },
           juying: {
             base_url: $('cfgJuyingBase').value,
             signin_path: $('cfgJuyingPath').value,
-            proxy_mode: $('cfgJuyingProxyMode').value,
-            proxy_url: $('cfgJuyingProxy').value
+            proxy_mode: providerProxy ? 'custom_proxy' : 'direct',
+            proxy_url: providerProxy
           }
         },
         scheduler: { random_delay_seconds: Number($('cfgDelay').value || 0) }

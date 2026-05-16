@@ -10,6 +10,7 @@
 - 手动签到单账号、批量签到全部启用账号
 - 每分钟调度 `MM HH` 定时任务，并跳过同账号当天已成功记录
 - Telegram 和 Webhook 通知
+- 统一签到代理配置，同时作用于影巢和聚影
 - 单页 Web 控制台，敏感字段读取时掩码，保存掩码时保留旧值
 - Docker 部署
 
@@ -49,6 +50,8 @@ docker compose up -d --build
 ```
 
 数据会写入本地 `data/signin.db`。
+
+影巢和聚影共用「配置 -> 基础 -> 签到代理 URL」。Telegram 通知代理单独配置，只影响 Telegram 消息发送。
 
 在线构建镜像会由 GitHub Actions 推送到 GHCR：
 

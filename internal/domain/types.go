@@ -64,6 +64,7 @@ type SignInResult struct {
 
 type Settings struct {
 	Timezone  string           `json:"timezone"`
+	ProxyURL  string           `json:"proxy_url"`
 	Web       WebConfig        `json:"web"`
 	Notify    NotifyConfig     `json:"notify"`
 	Providers ProviderSettings `json:"providers"`
@@ -256,6 +257,23 @@ func MergeMaskedSettings(next, old Settings) Settings {
 		next.Providers.HDHive.GlobalAPIKey = old.Providers.HDHive.GlobalAPIKey
 	}
 	return next.WithDefaults()
+}
+
+func (s Settings) SignInProxyURL() string {
+	if strings.TrimSpace(s.ProxyURL) != "" {
+		return strings.TrimSpace(s.ProxyURL)
+	}
+	if strings.TrimSpace(s.Providers.HDHive.ProxyURL) != "" {
+		return strings.TrimSpace(s.Providers.HDHive.ProxyURL)
+	}
+	juyingProxyMode := strings.TrimSpace(s.Providers.JuYing.ProxyMode)
+	if strings.TrimSpace(s.Providers.JuYing.ProxyURL) != "" && juyingProxyMode == "custom_proxy" {
+		return strings.TrimSpace(s.Providers.JuYing.ProxyURL)
+	}
+	if juyingProxyMode == "tg_proxy" {
+		return strings.TrimSpace(s.Notify.TelegramProxyURL)
+	}
+	return ""
 }
 
 func NewID(prefix string) string {
