@@ -505,7 +505,9 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.success === false) {
-        throw new Error(data.error || `HTTP ${res.status}`);
+        const err = new Error(data.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
       }
       return data.data ?? data;
     }
@@ -532,14 +534,37 @@
     }
 
     async function boot() {
-      try {
-        await api('/api/me');
-        $('login').classList.add('hidden');
-        $('app').classList.remove('hidden');
-        await Promise.all([loadConfig(), loadAccounts(), loadOverview(), loadHistory()]);
-      } catch {
+      const ok = await checkSession();
+      if (!ok) {
         $('login').classList.remove('hidden');
         $('app').classList.add('hidden');
+        return;
+      }
+      showApp();
+      await loadInitialData();
+    }
+
+    async function checkSession() {
+      try {
+        await api('/api/me');
+        return true;
+      } catch (err) {
+        if (err.status === 401) return false;
+        toast(err.message, true);
+        return false;
+      }
+    }
+
+    function showApp() {
+      $('login').classList.add('hidden');
+      $('app').classList.remove('hidden');
+    }
+
+    async function loadInitialData() {
+      const tasks = await Promise.allSettled([loadConfig(), loadAccounts(), loadOverview(), loadHistory()]);
+      const failed = tasks.find(item => item.status === 'rejected');
+      if (failed) {
+        toast(failed.reason?.message || '加载数据失败', true);
       }
     }
 
@@ -712,7 +737,11 @@
           method: 'POST',
           body: JSON.stringify({ username: $('loginUser').value, password: $('loginPass').value })
         });
-        await boot();
+        if (!(await checkSession())) {
+          throw new Error('登录成功，但浏览器没有保存会话，请刷新页面后重试');
+        }
+        showApp();
+        await loadInitialData();
       } catch (err) {
         toast(err.message, true);
       }
