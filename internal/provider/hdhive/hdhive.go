@@ -220,10 +220,14 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 		client.CheckRedirect = originalCheckRedirect
 	}()
 	var meaningfulErr error
+	var actionErr error
 	if err := tryHdhiveLoginAction(ctx, client, baseURL, loginPageBody, username, password); err == nil {
 		return nil
-	} else if isMeaningfulLoginError(err) {
-		meaningfulErr = err
+	} else {
+		actionErr = err
+		if isMeaningfulLoginError(err) {
+			meaningfulErr = err
+		}
 	}
 	jsonPayloads := []map[string]string{
 		{"username": username, "password": password},
@@ -256,8 +260,13 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 	}
 	if err := tryNextAction(ctx, client, baseURL, []string{"login", "signIn"}, fmt.Sprintf(`["%s","%s"]`, escapeJSONString(username), escapeJSONString(password)), "/login", loginPageBody); err == nil {
 		return nil
-	} else if meaningfulErr == nil && isMeaningfulLoginError(err) {
-		meaningfulErr = err
+	} else {
+		if actionErr == nil {
+			actionErr = err
+		}
+		if meaningfulErr == nil && isMeaningfulLoginError(err) {
+			meaningfulErr = err
+		}
 	}
 	if meaningfulErr != nil {
 		return fmt.Errorf("影巢网页登录失败: %w", meaningfulErr)
@@ -268,6 +277,9 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 			return fmt.Errorf("%s (HTTP %d)", msg, lastStatus)
 		}
 		return fmt.Errorf("%s", msg)
+	}
+	if actionErr != nil {
+		return fmt.Errorf("影巢网页登录失败: %w", actionErr)
 	}
 	if lastErr != nil {
 		return fmt.Errorf("影巢网页登录失败: %w", lastErr)
@@ -434,8 +446,11 @@ func rememberAttempt(lastBody *[]byte, lastStatus *int, lastErr *error, body []b
 	if len(body) == 0 {
 		return
 	}
+	if looksLikeNotFound(status, body) {
+		return
+	}
 	msg := messageFromBody(body, "")
-	if msg == "" && !looksLikeNotFound(status, body) {
+	if msg == "" {
 		msg = firstLine(string(body))
 	}
 	if msg != "" {

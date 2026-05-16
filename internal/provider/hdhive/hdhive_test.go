@@ -87,6 +87,45 @@ func TestPostNextActionNotFoundReturnsReadableError(t *testing.T) {
 	}
 }
 
+func TestRememberAttemptSkipsNotFoundHTML(t *testing.T) {
+	var lastBody []byte
+	var lastStatus int
+	var lastErr error
+
+	rememberAttempt(&lastBody, &lastStatus, &lastErr, []byte(`<!DOCTYPE html><html><head><title>404</title></head></html>`), http.StatusNotFound, nil)
+
+	if len(lastBody) != 0 || lastStatus != 0 || lastErr != nil {
+		t.Fatalf("rememberAttempt kept not-found HTML: body=%q status=%d err=%v", string(lastBody), lastStatus, lastErr)
+	}
+}
+
+func TestLoginKeepsActionNotFoundOverLegacyFallback(t *testing.T) {
+	actionChunk := `let d=(0,s.createServerReference)("` + hdhiveLoginActionFallback + `",s.callServer,void 0,s.findSourceMapURL,"login");`
+	notFoundHTML := []byte(`<!DOCTYPE html><html lang="zh-Hans"><head><title>404</title></head></html>`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/login"):
+			_, _ = w.Write([]byte(actionChunk))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write(notFoundHTML)
+		}
+	}))
+	defer srv.Close()
+
+	err := login(context.Background(), srv.Client(), srv.URL, "user@example.com", "password123")
+	if err == nil {
+		t.Fatal("login returned nil error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "Action 已失效") {
+		t.Fatalf("login error = %q, want action route failure", got)
+	}
+	if strings.Contains(got, "<!DOCTYPE html>") || strings.Contains(got, "接口返回 HTML") {
+		t.Fatalf("login error = %q, should not expose legacy HTML fallback", got)
+	}
+}
+
 func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 	var sawActionHeaders bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
