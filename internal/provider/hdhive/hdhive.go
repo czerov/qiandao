@@ -3,6 +3,7 @@ package hdhive
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,6 +115,7 @@ func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, se
 		return provider.Result{}, err
 	}
 	base, _ := url.Parse(baseURL)
+	var patch *domain.AccountCredential
 	if strings.TrimSpace(account.Credential.Cookie) != "" {
 		setCookieHeader(client, base, account.Credential.Cookie)
 	} else {
@@ -123,10 +125,11 @@ func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, se
 		if err := login(ctx, client, baseURL, account.Credential.Username, account.Credential.Password); err != nil {
 			return provider.Result{}, err
 		}
+		patch = credentialPatch(account, client, base)
 	}
 	body, status, err := webCheckIn(ctx, client, baseURL, account.Options.Dog)
 	if err != nil {
-		return provider.Result{}, err
+		return provider.Result{CredentialPatch: patch}, err
 	}
 	result := parseHDHiveResult(body, status)
 	result.Platform = domain.PlatformHDHive
@@ -137,15 +140,11 @@ func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, se
 	} else {
 		result.Mode = "网页签到"
 	}
-	if !result.Success {
-		return provider.Result{SignInResult: result}, fmt.Errorf("%s", result.Message)
+	if patch == nil {
+		patch = credentialPatch(account, client, base)
 	}
-	cookie := cookieString(client, base)
-	var patch *domain.AccountCredential
-	if cookie != "" && cookie != account.Credential.Cookie {
-		next := account.Credential
-		next.Cookie = cookie
-		patch = &next
+	if !result.Success {
+		return provider.Result{SignInResult: result, CredentialPatch: patch}, fmt.Errorf("%s", result.Message)
 	}
 	return provider.Result{SignInResult: result, CredentialPatch: patch}, nil
 }
@@ -191,8 +190,12 @@ func doJSONRequest(ctx context.Context, client *http.Client, method, rawURL stri
 
 func login(ctx context.Context, client *http.Client, baseURL, username, password string) error {
 	_, _, _ = doJSONRequest(ctx, client, http.MethodGet, httpx.JoinURL(baseURL, "/login"), nil, nil)
+	if err := tryHdhiveLoginAction(ctx, client, baseURL, username, password); err == nil {
+		return nil
+	}
 	jsonPayloads := []map[string]string{
 		{"username": username, "password": password},
+		{"username": username, "password": encodePassword(password), "password_transport": "base64"},
 		{"email": username, "password": password},
 		{"name": username, "password": password},
 	}
@@ -218,6 +221,22 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 		return nil
 	}
 	return fmt.Errorf("影巢网页登录失败，请检查账号密码、Cookie 或站点是否需要额外验证")
+}
+
+func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, username, password string) error {
+	payload := nextActionPayload(map[string]string{
+		"username":           username,
+		"password":           encodePassword(password),
+		"password_transport": "base64",
+	}, "/")
+	body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload)
+	if err != nil {
+		return err
+	}
+	if status >= 400 || !likelySuccess(body) {
+		return fmt.Errorf("影巢登录 action 返回失败")
+	}
+	return nil
 }
 
 func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bool) ([]byte, int, error) {
@@ -267,7 +286,7 @@ func postNextAction(ctx context.Context, client *http.Client, baseURL string, na
 	if err != nil {
 		return nil, 0, err
 	}
-	for _, endpoint := range []string{"/", "/login", "/user", "/dashboard"} {
+	for _, endpoint := range actionEndpoints(names) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, httpx.JoinURL(baseURL, endpoint), strings.NewReader(payload))
 		if err != nil {
 			return nil, 0, err
@@ -276,6 +295,9 @@ func postNextAction(ctx context.Context, client *http.Client, baseURL string, na
 		req.Header.Set("Accept", "text/x-component")
 		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
 		req.Header.Set("Next-Action", id)
+		req.Header.Set("Next-Url", endpoint)
+		req.Header.Set("Origin", strings.TrimRight(baseURL, "/"))
+		req.Header.Set("Referer", httpx.JoinURL(baseURL, endpoint))
 		resp, err := client.Do(req)
 		if err != nil {
 			continue
@@ -346,6 +368,7 @@ func findActionID(blob string, names []string) string {
 	for _, name := range names {
 		quoted := regexp.QuoteMeta(name)
 		patterns := []string{
+			`(?is)createServerReference\(["']([a-f0-9]{32,80})["'][^)]*["']` + quoted + `["']`,
 			`(?is)` + quoted + `.{0,400}?["']([a-f0-9]{32,80})["']`,
 			`(?is)["']([a-f0-9]{32,80})["'].{0,400}?` + quoted,
 		}
@@ -521,7 +544,7 @@ func likelySuccess(raw []byte) bool {
 		return true
 	}
 	text := strings.ToLower(string(raw))
-	if containsAny(text, []string{"invalid", "unauthorized", "forbidden", "失败", "错误", "密码错误"}) {
+	if containsAny(text, []string{"invalid", "unauthorized", "forbidden", "failed", "失败", "错误", "密码错误", "不正确", "不存在", "too many"}) {
 		return false
 	}
 	obj := map[string]any{}
@@ -573,6 +596,24 @@ func escapeJSONString(s string) string {
 	return strings.Trim(string(raw), `"`)
 }
 
+func actionEndpoints(names []string) []string {
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), "login") {
+			return []string{"/login", "/", "/user", "/dashboard"}
+		}
+	}
+	return []string{"/", "/login", "/user", "/dashboard"}
+}
+
+func encodePassword(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+func nextActionPayload(args ...any) string {
+	raw, _ := json.Marshal(args)
+	return string(raw)
+}
+
 func hostCandidates(baseURL string) []string {
 	baseURL = httpx.NormalizeBaseURL(baseURL, "https://hdhive.com")
 	seen := map[string]bool{}
@@ -620,4 +661,14 @@ func cookieString(client *http.Client, base *url.URL) string {
 		parts = append(parts, c.Name+"="+c.Value)
 	}
 	return strings.Join(parts, "; ")
+}
+
+func credentialPatch(account domain.Account, client *http.Client, base *url.URL) *domain.AccountCredential {
+	cookie := cookieString(client, base)
+	if cookie == "" || cookie == account.Credential.Cookie {
+		return nil
+	}
+	next := account.Credential
+	next.Cookie = cookie
+	return &next
 }
