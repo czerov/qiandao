@@ -3,6 +3,7 @@ package hdhive
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -108,7 +109,7 @@ func (p *Provider) openAPISignIn(ctx context.Context, account domain.Account, se
 
 func (p *Provider) webSignIn(ctx context.Context, account domain.Account, settings domain.Settings, baseURL string) (provider.Result, error) {
 	var lastErr error
-	for _, host := range hostCandidates(baseURL) {
+	for _, host := range hdhiveBaseURLCandidates(baseURL) {
 		result, err := p.webSignInHost(ctx, account, settings, host)
 		if err == nil {
 			return result, nil
@@ -122,7 +123,7 @@ func (p *Provider) webSignIn(ctx context.Context, account domain.Account, settin
 }
 
 func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, settings domain.Settings, baseURL string) (provider.Result, error) {
-	client, err := httpx.NewClient(settings.SignInProxyURL(), 35*time.Second)
+	client, err := newHDHiveBrowserClient(settings.SignInProxyURL(), 35*time.Second)
 	if err != nil {
 		return provider.Result{}, err
 	}
@@ -209,6 +210,41 @@ func doJSONRequest(ctx context.Context, client *http.Client, method, rawURL stri
 		return nil, 0, err
 	}
 	return raw, resp.StatusCode, nil
+}
+
+func newHDHiveBrowserClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	if timeout <= 0 {
+		timeout = 35 * time.Second
+	}
+	jar, _ := cookiejar.New(nil)
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			MaxVersion: tls.VersionTLS13,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_AES_128_GCM_SHA256,
+				tls.TLS_AES_256_GCM_SHA384,
+			},
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	if strings.TrimSpace(proxyURL) != "" {
+		u, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("代理地址无效: %w", err)
+		}
+		transport.Proxy = http.ProxyURL(u)
+	}
+	return &http.Client{Timeout: timeout, Transport: transport, Jar: jar}, nil
 }
 
 func login(ctx context.Context, client *http.Client, baseURL, username, password string) error {
@@ -299,27 +335,46 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 }
 
 func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, pageBody, username, password string) error {
-	payload := hdhiveLoginActionPayload(username, password)
-	body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload, "/login", pageBody)
-	if err != nil {
-		return err
+	var lastErr error
+	for _, payload := range hdhiveLoginActionPayloads(username, password) {
+		body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload, "/login", pageBody)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if status >= 400 || !likelySuccess(body) {
+			lastErr = fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "影巢登录 action 返回失败"), status)
+			continue
+		}
+		if authCookieString(client, baseURL) == "" {
+			msg := messageFromBody(body, "auth cookies not found")
+			lastErr = fmt.Errorf("%s (HTTP %d)", msg, status)
+			continue
+		}
+		return nil
 	}
-	if status >= 400 || !likelySuccess(body) {
-		return fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "影巢登录 action 返回失败"), status)
+	if lastErr != nil {
+		return lastErr
 	}
-	if authCookieString(client, baseURL) == "" {
-		msg := messageFromBody(body, "auth cookies not found")
-		return fmt.Errorf("%s (HTTP %d)", msg, status)
-	}
-	return nil
+	return fmt.Errorf("影巢登录 action 返回失败")
 }
 
 func hdhiveLoginActionPayload(username, password string) string {
-	return nextActionPayload(map[string]string{
-		"username":           username,
-		"password":           base64.StdEncoding.EncodeToString([]byte(password)),
-		"password_transport": "base64",
-	}, "/")
+	return hdhiveLoginActionPayloads(username, password)[0]
+}
+
+func hdhiveLoginActionPayloads(username, password string) []string {
+	return []string{
+		nextActionPayload(map[string]string{
+			"username":           username,
+			"password":           base64.StdEncoding.EncodeToString([]byte(password)),
+			"password_transport": "base64",
+		}, "/"),
+		nextActionPayload(map[string]string{
+			"username": username,
+			"password": password,
+		}, "/"),
+	}
 }
 
 func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bool) ([]byte, int, error) {
@@ -1154,6 +1209,49 @@ func hostCandidates(baseURL string) []string {
 		}
 	}
 	add(baseURL)
+	return out
+}
+
+func hdhiveBaseURLCandidates(baseURL string) []string {
+	baseURL = resolveHDHiveSignBaseURL(baseURL)
+	parsed, err := url.Parse(baseURL)
+	scheme := "https"
+	port := ""
+	host := ""
+	if err == nil {
+		if parsed.Scheme != "" {
+			scheme = parsed.Scheme
+		}
+		host = strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+		if parsed.Port() != "" {
+			port = ":" + parsed.Port()
+		}
+	}
+	if host == "" {
+		host = "hdhive.com"
+	}
+
+	var out []string
+	addHost := func(candidate string) {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			return
+		}
+		raw := fmt.Sprintf("%s://%s%s", scheme, candidate, port)
+		for _, existing := range out {
+			if existing == raw {
+				return
+			}
+		}
+		out = append(out, raw)
+	}
+
+	addHost(host)
+	if strings.HasSuffix(host, "hdhive.com") || strings.HasSuffix(host, "hdhive.org") || strings.HasSuffix(host, "hdhive.online") {
+		addHost("hdhive.com")
+		addHost("hdhive.org")
+		addHost("hdhive.online")
+	}
 	return out
 }
 

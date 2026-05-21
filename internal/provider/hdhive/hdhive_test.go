@@ -208,6 +208,46 @@ func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 	}
 }
 
+func TestLoginActionFallsBackToPlainPasswordPayload(t *testing.T) {
+	var sawBase64Payload bool
+	var sawPlainPayload bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/login":
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`let d=(0,s.createServerReference)("` + hdhiveLoginActionFallback + `",s.callServer,void 0,s.findSourceMapURL,"login");`))
+				return
+			}
+			raw, _ := io.ReadAll(r.Body)
+			body := string(raw)
+			if strings.Contains(body, `"password_transport":"base64"`) {
+				sawBase64Payload = true
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":{"message":"base64 rejected"}}`))
+				return
+			}
+			if strings.Contains(body, `"password":"password123"`) {
+				sawPlainPayload = true
+				http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
+				w.WriteHeader(http.StatusSeeOther)
+				return
+			}
+			t.Fatalf("unexpected login payload: %s", body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := srv.Client()
+	if err := login(context.Background(), client, srv.URL, "user@example.com", "password123"); err != nil {
+		t.Fatalf("login returned error: %v", err)
+	}
+	if !sawBase64Payload || !sawPlainPayload {
+		t.Fatalf("payload attempts base64=%v plain=%v, want both", sawBase64Payload, sawPlainPayload)
+	}
+}
+
 func TestLoginActionCandidatesIncludeCurrentAndLegacyFallbacks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html><head></head><body>login</body></html>`))
@@ -253,5 +293,35 @@ func TestHostCandidatesAvoidOfflineMirrors(t *testing.T) {
 	got := strings.Join(hostCandidates("https://hdhive.online"), ",")
 	if got != "https://hdhive.com" {
 		t.Fatalf("hostCandidates() = %q, want only https://hdhive.com", got)
+	}
+}
+
+func TestHDHiveBaseURLCandidatesIncludeOfficialMirrors(t *testing.T) {
+	got := strings.Join(hdhiveBaseURLCandidates("https://hdhive.com"), ",")
+	want := "https://hdhive.com,https://hdhive.org,https://hdhive.online"
+	if got != want {
+		t.Fatalf("hdhiveBaseURLCandidates() = %q, want %q", got, want)
+	}
+}
+
+func TestNewHDHiveBrowserClientUsesConfiguredProxy(t *testing.T) {
+	client, err := newHDHiveBrowserClient("http://127.0.0.1:7890", 10)
+	if err != nil {
+		t.Fatalf("newHDHiveBrowserClient() error = %v", err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("transport.Proxy is nil, want configured proxy")
+	}
+	req := httptest.NewRequest(http.MethodGet, "https://hdhive.com/", nil)
+	proxyURL, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatalf("transport.Proxy() error = %v", err)
+	}
+	if proxyURL.String() != "http://127.0.0.1:7890" {
+		t.Fatalf("proxyURL = %q", proxyURL.String())
 	}
 }
