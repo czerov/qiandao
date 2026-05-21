@@ -15,9 +15,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"qiandao/internal/domain"
+	"qiandao/internal/oneonefivecookie"
 	"qiandao/internal/service"
 	"qiandao/internal/store"
 )
@@ -27,6 +29,9 @@ type Server struct {
 	service    *service.SignInService
 	staticDir  string
 	sessionKey []byte
+
+	cookie115Mu      sync.Mutex
+	cookie115Service *oneonefivecookie.Service
 }
 
 func New(st store.Store, svc *service.SignInService, staticDir string) *Server {
@@ -120,6 +125,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRecords(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/signin/"):
 		s.handleSignInOne(w, r)
+	case r.URL.Path == "/api/115-cookie/apps":
+		s.handle115CookieApps(w, r)
+	case r.URL.Path == "/api/115-cookie/qrcode":
+		s.handle115CookieCreateQRCode(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/115-cookie/sessions/"):
+		s.handle115CookieSession(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}

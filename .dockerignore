@@ -1,0 +1,9 @@
+.git
+.github
+data
+*.db
+*.db-shm
+*.db-wal
+signin-app
+signin-app.exe
+HDHIVE_SIGNIN_CODE.md

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"qiandao/internal/domain"
 )
 
 func TestLoginSetsTokenAndFrontendHeaders(t *testing.T) {
@@ -39,6 +41,9 @@ func TestLoginSetsTokenAndFrontendHeaders(t *testing.T) {
 	}
 	if got := c.headers["X-App-User-Token"]; got != "app-token" {
 		t.Fatalf("X-App-User-Token = %q, want app-token", got)
+	}
+	if got := c.userToken; got != "app-token" {
+		t.Fatalf("userToken = %q, want app-token", got)
 	}
 }
 
@@ -86,5 +91,84 @@ func TestLoginReturnsNetworkError(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "聚影登录失败:") {
 		t.Fatalf("login error = %q, want network detail", got)
+	}
+}
+
+func TestSignInUsesWebTokenOverDeveloperAuth(t *testing.T) {
+	var sawSignin bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/csrf/":
+			http.SetCookie(w, &http.Cookie{Name: "csrftoken", Value: "csrf-value", Path: "/"})
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/app/login/":
+			_, _ = w.Write([]byte(`{"token":"user-token","message":"登录成功"}`))
+		case "/api/app/checkin/do/":
+			sawSignin = true
+			if got := r.Header.Get("X-App-User-Token"); got != "user-token" {
+				t.Fatalf("X-App-User-Token = %q", got)
+			}
+			if got := r.Header.Get("X-App-Id"); got != "" {
+				t.Fatalf("unexpected X-App-Id = %q", got)
+			}
+			if got := r.Header.Get("X-CSRFToken"); got != "csrf-value" {
+				t.Fatalf("X-CSRFToken = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"success":true,"message":"登录后签到成功","data":{"reward_points":5}}`))
+		case "/api/app/profile/", "/api/app/checkin/stats/":
+			_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	result, err := New().SignIn(context.Background(), domain.Account{
+		ID:       "acc",
+		Platform: domain.PlatformJuYing,
+		Credential: domain.AccountCredential{
+			Username: "user@example.com",
+			Password: "secret",
+			AppID:    "app-id",
+			APIKey:   "api-key",
+		},
+	}, domain.Settings{Providers: domain.ProviderSettings{JuYing: domain.JuYingSettings{BaseURL: srv.URL}}})
+	if err != nil {
+		t.Fatalf("SignIn returned error: %v", err)
+	}
+	if !sawSignin || !result.SignInResult.Success || result.SignInResult.Message != "登录后签到成功" {
+		t.Fatalf("result=%#v sawSignin=%v", result.SignInResult, sawSignin)
+	}
+}
+
+func TestDiscoverCheckinPathFromNestedBundle(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`<html><script type="module" src="/assets/main.js"></script></html>`))
+		case "/assets/main.js":
+			_, _ = w.Write([]byte(`component:()=>import("./CheckIn.js")`))
+		case "/assets/CheckIn.js":
+			_, _ = w.Write([]byte(`const pe={getStats(){return api.get("/api/app/checkin/stats/")},doCheckin(){return api.post("/api/app/checkin/do/")}};`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := &client{http: srv.Client(), baseURL: srv.URL, headers: map[string]string{}}
+	got, err := c.discoverCheckinPath(context.Background())
+	if err != nil {
+		t.Fatalf("discoverCheckinPath returned error: %v", err)
+	}
+	if got != "/api/app/checkin/do/" {
+		t.Fatalf("discoverCheckinPath = %q, want /api/app/checkin/do/", got)
+	}
+}
+
+func TestExtractCheckinPathPrefersDoCheckin(t *testing.T) {
+	source := "var t={getStats(){return e.get(`/api/app/checkin/stats/`)},doCheckin(){return e.post(`/api/app/checkin/do/`)}};"
+	if got := extractCheckinPath(source); got != "/api/app/checkin/do/" {
+		t.Fatalf("extractCheckinPath = %q, want /api/app/checkin/do/", got)
 	}
 }

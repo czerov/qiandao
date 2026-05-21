@@ -2,6 +2,7 @@ package hdhive
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,19 +20,47 @@ func TestFindActionIDFromCreateServerReference(t *testing.T) {
 
 func TestHDHiveLoginActionPayload(t *testing.T) {
 	payload := nextActionPayload(map[string]string{
-		"username":           "user@example.com",
-		"password":           encodePassword("12345678"),
-		"password_transport": "base64",
+		"username": "user@example.com",
+		"password": "12345678",
 	}, "/")
 	for _, want := range []string{
 		`"username":"user@example.com"`,
-		`"password":"MTIzNDU2Nzg="`,
-		`"password_transport":"base64"`,
+		`"password":"12345678"`,
 		`"/"`,
 	} {
 		if !strings.Contains(payload, want) {
 			t.Fatalf("payload %q missing %q", payload, want)
 		}
+	}
+}
+
+func TestWebCheckInPrefersCustomerEndpoint(t *testing.T) {
+	var sawCustomer bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/customer/user/checkin":
+			sawCustomer = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			_, _ = w.Write([]byte(`{"success":true,"message":"REST 签到成功","data":{"gained_points":5,"total_points":128,"signin_days":9}}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	body, status, err := webCheckIn(context.Background(), srv.Client(), srv.URL, false)
+	if err != nil {
+		t.Fatalf("webCheckIn returned error: %v", err)
+	}
+	if status != http.StatusOK || !sawCustomer {
+		t.Fatalf("status=%d sawCustomer=%v", status, sawCustomer)
+	}
+	result := parseHDHiveResult(body, status)
+	mergeHDHiveWebResult(&result, body, false)
+	if !result.Success || result.Message != "REST 签到成功" || result.RewardPoints != 5 || result.TotalPoints != 128 || result.SigninDays != 9 {
+		t.Fatalf("result = %#v", result)
 	}
 }
 
@@ -128,6 +157,7 @@ func TestLoginKeepsActionNotFoundOverLegacyFallback(t *testing.T) {
 
 func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 	var sawActionHeaders bool
+	var sawPlainPassword bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
@@ -140,6 +170,8 @@ func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 			sawActionHeaders = r.Header.Get("Next-Action") == hdhiveLoginActionFallback &&
 				r.Header.Get("Next-Router-State-Tree") == hdhiveLoginRouterStateTree &&
 				r.Header.Get("x-nextjs-post") == "1"
+			raw, _ := io.ReadAll(r.Body)
+			sawPlainPassword = strings.Contains(string(raw), `"password":"password123"`)
 			http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
 			w.WriteHeader(http.StatusSeeOther)
 		case "/chunk.js":
@@ -156,6 +188,9 @@ func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 	}
 	if !sawActionHeaders {
 		t.Fatal("login action did not include HDHive browser-compatible action headers")
+	}
+	if !sawPlainPassword {
+		t.Fatal("login action did not use AetherFlow-compatible plain password payload")
 	}
 	if got := authCookieString(client, srv.URL); !strings.Contains(got, "session=ok") {
 		t.Fatalf("authCookieString() = %q, want session cookie", got)

@@ -292,6 +292,34 @@
     }
     .message.show { display: block; }
     .message.error { border-color: #fecdca; color: var(--danger); }
+    .qr-box {
+      width: min(280px, 100%);
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      color: var(--muted);
+      overflow: hidden;
+    }
+    .qr-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-height: 28px;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
     .hidden { display: none !important; }
     @media (max-width: 860px) {
       .topbar {
@@ -332,6 +360,7 @@
       <nav class="tabs">
         <button data-tab="overview" class="active">总览</button>
         <button data-tab="accounts">账号</button>
+        <button data-tab="tools">工具箱</button>
         <button data-tab="config">配置</button>
         <button data-tab="history">历史</button>
         <button id="logoutBtn">退出</button>
@@ -419,6 +448,55 @@
         </div>
       </section>
 
+      <section id="tab-tools" class="hidden">
+        <div class="toolbar">
+          <h1>工具箱</h1>
+        </div>
+        <div class="grid two">
+          <div class="panel">
+            <h2>115 扫码获取 CK</h2>
+            <div class="form-grid">
+              <label>设备端
+                <select id="cookie115App"></select>
+              </label>
+              <div class="actions" style="align-self:end">
+                <button class="primary" id="start115Cookie" type="button">开始扫码获取 CK</button>
+              </div>
+              <div class="wide">
+                <div id="cookie115QR" class="qr-box">等待生成二维码</div>
+              </div>
+              <div class="wide status-line">
+                <span id="cookie115Status" class="badge">未开始</span>
+                <span id="cookie115Message" class="meta">全程直连 115 接口</span>
+              </div>
+              <label class="wide">文本 CK
+                <textarea id="cookie115Text" class="mono" spellcheck="false" readonly></textarea>
+              </label>
+              <label class="wide">JSON Cookie
+                <textarea id="cookie115JSON" class="mono" spellcheck="false" readonly></textarea>
+              </label>
+              <div class="actions wide">
+                <button id="copy115Text" type="button">复制文本 CK</button>
+                <button id="copy115JSON" type="button">复制 JSON Cookie</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <h2>状态</h2>
+            <div class="list">
+              <article class="item">
+                <div class="meta">联网方式</div>
+                <div>直连，不读取系统代理或环境代理。</div>
+              </article>
+              <article class="item">
+                <div class="meta">会话</div>
+                <div id="cookie115Session" class="mono">-</div>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="tab-config" class="hidden">
         <div class="toolbar">
           <h1>配置</h1>
@@ -487,7 +565,11 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = { accounts: [], config: null };
+    const state = {
+      accounts: [],
+      config: null,
+      oneOneFive: { apps: [], session: null, pollTimer: null, loading: false }
+    };
 
     async function api(path, options = {}) {
       const res = await fetch(path, {
@@ -501,7 +583,7 @@
         err.status = res.status;
         throw err;
       }
-      return data.data ?? data;
+      return Object.prototype.hasOwnProperty.call(data, 'data') ? data.data : data;
     }
 
     function toast(text, error = false) {
@@ -558,6 +640,7 @@
       if (failed) {
         toast(failed.reason?.message || '加载数据失败', true);
       }
+      load115Apps().catch(() => {});
     }
 
     async function loadOverview() {
@@ -613,6 +696,127 @@
       $('cfgHdhiveKey').value = data.providers?.hdhive?.global_api_key || '';
       $('cfgJuyingBase').value = data.providers?.juying?.base_url || '';
       $('cfgJuyingPath').value = data.providers?.juying?.signin_path || '';
+    }
+
+    async function load115Apps() {
+      const data = await api('/api/115-cookie/apps');
+      state.oneOneFive.apps = data || [];
+      $('cookie115App').innerHTML = state.oneOneFive.apps.map(app =>
+        `<option value="${escapeHtml(app.value)}">${escapeHtml(app.label)}</option>`
+      ).join('');
+      if (state.oneOneFive.apps.some(app => app.value === 'alipaymini')) {
+        $('cookie115App').value = 'alipaymini';
+      }
+    }
+
+    async function start115CookieAuth() {
+      stop115CookiePoll();
+      state.oneOneFive.loading = true;
+      state.oneOneFive.session = null;
+      render115CookieSession({
+        status: 'pending',
+        message: '正在生成二维码...',
+        id: '-',
+        qr_code_png_data_url: ''
+      });
+      $('start115Cookie').disabled = true;
+      $('cookie115Text').value = '';
+      $('cookie115JSON').value = '';
+      try {
+        if (!state.oneOneFive.apps.length) {
+          await load115Apps();
+        }
+        const session = await api('/api/115-cookie/qrcode', {
+          method: 'POST',
+          body: JSON.stringify({ app: $('cookie115App').value || 'alipaymini' })
+        });
+        state.oneOneFive.session = session;
+        render115CookieSession(session);
+        poll115CookieSession(session.id);
+      } catch (err) {
+        render115CookieSession({ status: 'failed', message: err.message, id: '-' });
+        toast(err.message, true);
+      } finally {
+        state.oneOneFive.loading = false;
+        $('start115Cookie').disabled = false;
+      }
+    }
+
+    function poll115CookieSession(id) {
+      if (!id) return;
+      stop115CookiePoll();
+      state.oneOneFive.pollTimer = setInterval(async () => {
+        try {
+          const session = await api('/api/115-cookie/sessions/' + encodeURIComponent(id));
+          state.oneOneFive.session = session;
+          render115CookieSession(session);
+          if (is115Terminal(session.status)) {
+            stop115CookiePoll();
+            if (session.status === 'authorized') toast('115 CK 已生成');
+          }
+        } catch (err) {
+          stop115CookiePoll();
+          render115CookieSession({ status: 'failed', message: err.message, id });
+          toast(err.message, true);
+        }
+      }, 2200);
+    }
+
+    function stop115CookiePoll() {
+      if (state.oneOneFive.pollTimer) {
+        clearInterval(state.oneOneFive.pollTimer);
+        state.oneOneFive.pollTimer = null;
+      }
+    }
+
+    function render115CookieSession(session) {
+      const status = session?.status || 'pending';
+      const message = session?.message || '-';
+      const badgeClass = status === 'authorized'
+        ? 'badge ok'
+        : (status === 'failed' || status === 'expired' || status === 'canceled') ? 'badge fail' : 'badge warn';
+      $('cookie115Status').className = badgeClass;
+      $('cookie115Status').textContent = statusName115(status);
+      $('cookie115Message').textContent = message;
+      $('cookie115Session').textContent = session?.id || '-';
+
+      if (session?.qr_code_png_data_url) {
+        $('cookie115QR').innerHTML = `<img alt="115 扫码二维码" src="${session.qr_code_png_data_url}">`;
+      } else if (status === 'authorized') {
+        $('cookie115QR').textContent = 'CK 已生成';
+      } else if (status === 'failed' || status === 'expired' || status === 'canceled') {
+        $('cookie115QR').textContent = message;
+      } else if (!$('cookie115QR').querySelector('img')) {
+        $('cookie115QR').textContent = '等待生成二维码';
+      }
+
+      $('cookie115Text').value = session?.cookie_text || '';
+      $('cookie115JSON').value = session?.cookie_json ? JSON.stringify(session.cookie_json, null, 2) : '';
+    }
+
+    function is115Terminal(status) {
+      return ['authorized', 'failed', 'expired', 'canceled'].includes(status);
+    }
+
+    function statusName115(status) {
+      return {
+        pending: '等待扫码',
+        scanned: '已扫码',
+        authorized: '已生成',
+        canceled: '已取消',
+        expired: '已过期',
+        failed: '失败'
+      }[status] || status || '-';
+    }
+
+    async function copy115Cookie(type) {
+      const value = type === 'json' ? $('cookie115JSON').value : $('cookie115Text').value;
+      if (!value) {
+        toast('还没有可复制的 CK', true);
+        return;
+      }
+      await navigator.clipboard.writeText(value);
+      toast('已复制');
     }
 
     function accountItem(a) {
@@ -838,6 +1042,9 @@
     $('historyPlatform').addEventListener('change', loadHistory);
     $('newAccount').addEventListener('click', resetAccountForm);
     $('resetAccountForm').addEventListener('click', resetAccountForm);
+    $('start115Cookie').addEventListener('click', start115CookieAuth);
+    $('copy115Text').addEventListener('click', () => copy115Cookie('text'));
+    $('copy115JSON').addEventListener('click', () => copy115Cookie('json'));
 
     document.querySelectorAll('[data-tab]').forEach(btn => {
       btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -847,6 +1054,9 @@
       document.querySelectorAll('[data-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tab));
       for (const el of document.querySelectorAll('main > section')) el.classList.add('hidden');
       $('tab-' + tab).classList.remove('hidden');
+      if (tab === 'tools' && !state.oneOneFive.apps.length) {
+        load115Apps().catch(err => toast(err.message, true));
+      }
     }
 
     function escapeHtml(v) {

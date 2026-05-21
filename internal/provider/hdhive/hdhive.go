@@ -3,7 +3,6 @@ package hdhive
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,7 +23,8 @@ type Provider struct{}
 
 const (
 	hdhiveBrowserUA             = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-	hdhiveLoginActionFallback   = "6068df40ea98050274d29084c0083d1712cc19e909"
+	hdhiveLoginActionFallback   = "603b753f736d128b24c8b4f894057aa301eda77339"
+	hdhiveCheckinActionFallback = "40efbc107064215e9eff178b0466274739ba7d9cb4"
 	hdhiveDugouActionFallback   = "f30185aabded8ca281fe911b11b1dbdba999fa1f"
 	hdhiveLoginRouterStateTree  = `%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%5D%7D%5D%7D%5D`
 	hdhiveAppRouterStateTree    = `%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2F%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D`
@@ -138,26 +138,36 @@ func (p *Provider) webSignInHost(ctx context.Context, account domain.Account, se
 		patch = credentialPatch(account, client, base)
 	}
 	body, status, err := webCheckIn(ctx, client, baseURL, account.Options.Dog)
-	if err != nil {
+	if err != nil && len(body) == 0 {
 		return provider.Result{CredentialPatch: patch}, err
-	}
-	result := parseHDHiveResult(body, status)
-	result.Platform = domain.PlatformHDHive
-	result.AccountID = account.ID
-	result.AccountName = account.DisplayName()
-	mergeHDHiveWebResult(&result, body, account.Options.Dog)
-	if account.Options.Dog {
-		result.Mode = "赌狗抽签"
-	} else {
-		result.Mode = "网页签到"
 	}
 	if patch == nil {
 		patch = credentialPatch(account, client, base)
 	}
+	pr := buildHDHiveWebResult(account, patch, body, status, account.Options.Dog)
+	result := pr.SignInResult
 	if !result.Success {
-		return provider.Result{SignInResult: result, CredentialPatch: patch}, fmt.Errorf("%s", result.Message)
+		if err != nil && strings.TrimSpace(result.Message) == "" {
+			result.Message = err.Error()
+			pr.SignInResult = result
+		}
+		return pr, fmt.Errorf("%s", result.Message)
 	}
-	return provider.Result{SignInResult: result, CredentialPatch: patch}, nil
+	return pr, nil
+}
+
+func buildHDHiveWebResult(account domain.Account, patch *domain.AccountCredential, body []byte, status int, dog bool) provider.Result {
+	result := parseHDHiveResult(body, status)
+	result.Platform = domain.PlatformHDHive
+	result.AccountID = account.ID
+	result.AccountName = account.DisplayName()
+	mergeHDHiveWebResult(&result, body, dog)
+	if dog {
+		result.Mode = "赌狗抽签"
+	} else {
+		result.Mode = "网页签到"
+	}
+	return provider.Result{SignInResult: result, CredentialPatch: patch}
 }
 
 func setOpenAPIHeaders(req *http.Request, apiKey string) {
@@ -231,7 +241,6 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 	}
 	jsonPayloads := []map[string]string{
 		{"username": username, "password": password},
-		{"username": username, "password": encodePassword(password), "password_transport": "base64"},
 		{"email": username, "password": password},
 		{"name": username, "password": password},
 	}
@@ -289,9 +298,8 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 
 func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, pageBody, username, password string) error {
 	payload := nextActionPayload(map[string]string{
-		"username":           username,
-		"password":           encodePassword(password),
-		"password_transport": "base64",
+		"username": username,
+		"password": password,
 	}, "/")
 	body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload, "/login", pageBody)
 	if err != nil {
@@ -308,8 +316,17 @@ func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, pag
 }
 
 func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bool) ([]byte, int, error) {
+	if !dog {
+		body, status, err := hdhiveCustomerCheckIn(ctx, client, baseURL)
+		if err == nil {
+			return body, status, nil
+		}
+		if len(body) > 0 && status >= 200 && status < 500 && !looksLikeNotFound(status, body) {
+			return body, status, err
+		}
+	}
 	payload := map[string]bool{"dog": dog}
-	for _, endpoint := range []string{"/api/checkin", "/api/user/checkin", "/api/attendance/checkin", "/api/signin"} {
+	for _, endpoint := range []string{"/api/customer/user/checkin", "/api/checkin", "/api/user/checkin", "/api/attendance/checkin", "/api/signin"} {
 		body, status, err := doJSONRequest(ctx, client, http.MethodPost, httpx.JoinURL(baseURL, endpoint), payload, nil)
 		if err == nil && status < 500 && !looksLikeNotFound(status, body) {
 			return body, status, nil
@@ -333,6 +350,17 @@ func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bo
 		}
 	}
 	return nil, 0, err
+}
+
+func hdhiveCustomerCheckIn(ctx context.Context, client *http.Client, baseURL string) ([]byte, int, error) {
+	body, status, err := doJSONRequest(ctx, client, http.MethodPost, httpx.JoinURL(baseURL, "/api/customer/user/checkin"), map[string]any{}, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	if status >= 200 && status < 300 {
+		return body, status, nil
+	}
+	return body, status, fmt.Errorf("%s (HTTP %d)", messageFromBody(body, "影巢网页登录签到失败"), status)
 }
 
 func doFormRequest(ctx context.Context, client *http.Client, rawURL string, form url.Values, decorate func(*http.Request)) ([]byte, int, error) {
@@ -476,6 +504,13 @@ func actionIDCandidates(ctx context.Context, client *http.Client, baseURL string
 	}
 	if isLoginAction(names) {
 		out = appendUniqueString(out, hdhiveLoginActionFallback)
+	} else {
+		for _, name := range names {
+			if strings.Contains(strings.ToLower(name), "checkin") || strings.Contains(strings.ToLower(name), "signin") {
+				out = appendUniqueString(out, hdhiveCheckinActionFallback)
+				break
+			}
+		}
 	}
 	for _, fallback := range fallbacks {
 		out = appendUniqueString(out, fallback)
@@ -526,7 +561,8 @@ func discoverActionID(ctx context.Context, client *http.Client, baseURL string, 
 }
 
 func fetchHDHiveText(ctx context.Context, client *http.Client, baseURL string, pathOrURL string, referer string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(baseURL, pathOrURL), nil)
+	targetURL := joinURL(baseURL, pathOrURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -573,12 +609,18 @@ func setHDHiveFetchHeaders(req *http.Request, pathOrURL string, referer string) 
 }
 
 func scriptSources(html string) []string {
-	re := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+\.js[^"']*)["']`)
-	matches := re.FindAllStringSubmatch(html, -1)
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)<(?:script|link)[^>]+(?:src|href)=["']([^"']+\.js(?:\?[^"']*)?)["']`),
+		regexp.MustCompile(`(?i)["']((?:\./)?(?:assets/)?[^"']*(?:checkin|signin|login)[^"']*\.js(?:\?[^"']*)?)["']`),
+		regexp.MustCompile(`(?i)(/_next/static/chunks/[^"'\\\s<>]+\.js(?:\?[^"'\\\s<>]*)?)`),
+	}
 	var out []string
-	for _, m := range matches {
-		if len(m) > 1 {
-			out = append(out, strings.ReplaceAll(m[1], `\u0026`, "&"))
+	for _, re := range patterns {
+		matches := re.FindAllStringSubmatch(html, -1)
+		for _, m := range matches {
+			if len(m) > 1 {
+				out = appendUniqueString(out, strings.ReplaceAll(m[1], `\u0026`, "&"))
+			}
 		}
 	}
 	return out
@@ -691,6 +733,9 @@ func mergeHDHiveWebResult(result *domain.SignInResult, raw []byte, dog bool) {
 	}
 	if msg := parseHDHiveWebCheckinMessage(body, dog); msg != "" {
 		result.Message = msg
+	}
+	if containsAny(body, []string{"已经签到", "今日已参与", "already signed", "already checked"}) {
+		result.Success = true
 	}
 	if result.RewardPoints == 0 {
 		result.RewardPoints = intFromString(findValEnhanced(body, []string{
@@ -1082,10 +1127,6 @@ func joinURL(baseURL, pathOrURL string) string {
 		return httpx.JoinURL(baseURL, pathOrURL)
 	}
 	return base.ResolveReference(ref).String()
-}
-
-func encodePassword(s string) string {
-	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 func nextActionPayload(args ...any) string {

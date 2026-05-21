@@ -22,9 +22,11 @@ import (
 type Provider struct{}
 
 type client struct {
-	http    *http.Client
-	baseURL string
-	headers map[string]string
+	http      *http.Client
+	baseURL   string
+	headers   map[string]string
+	account   domain.Account
+	userToken string
 }
 
 func New() *Provider {
@@ -50,6 +52,7 @@ func (p *Provider) SignIn(ctx context.Context, account domain.Account, settings 
 		http:    httpClient,
 		baseURL: baseURL,
 		headers: map[string]string{},
+		account: account,
 	}
 	if err := c.applyAuth(ctx, account); err != nil {
 		return provider.Result{}, err
@@ -58,15 +61,16 @@ func (p *Provider) SignIn(ctx context.Context, account domain.Account, settings 
 	if strings.TrimSpace(path) == "" {
 		path = "/api/app/checkin/do/"
 	}
-	body, status, err := c.request(ctx, http.MethodPost, path, map[string]any{})
+	body, status, err := c.postSignIn(ctx, path)
 	if err != nil {
 		return provider.Result{}, err
 	}
 	if authFailed(status, body) && account.Credential.Username != "" && account.Credential.Password != "" {
+		c.userToken = ""
 		if err := c.login(ctx, account.Credential.Username, account.Credential.Password); err != nil {
 			return provider.Result{}, err
 		}
-		body, status, err = c.request(ctx, http.MethodPost, path, map[string]any{})
+		body, status, err = c.postSignIn(ctx, path)
 		if err != nil {
 			return provider.Result{}, err
 		}
@@ -74,7 +78,7 @@ func (p *Provider) SignIn(ctx context.Context, account domain.Account, settings 
 	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed || status == http.StatusGone {
 		if discovered, discoverErr := c.discoverCheckinPath(ctx); discoverErr == nil && discovered != "" && discovered != path {
 			path = discovered
-			body, status, err = c.request(ctx, http.MethodPost, path, map[string]any{})
+			body, status, err = c.postSignIn(ctx, path)
 			if err != nil {
 				return provider.Result{}, err
 			}
@@ -114,6 +118,9 @@ func (c *client) applyAuth(ctx context.Context, account domain.Account) error {
 		if token := extractCookieValue(cred.Cookie, "csrftoken"); token != "" {
 			c.headers["X-CSRFToken"] = token
 		}
+		if token := extractCookieValue(cred.Cookie, "app_user_token"); token != "" {
+			c.userToken = token
+		}
 		return nil
 	}
 	if strings.TrimSpace(cred.SessionID) != "" {
@@ -128,7 +135,9 @@ func (c *client) applyAuth(ctx context.Context, account domain.Account) error {
 	if strings.TrimSpace(cred.AppID) != "" && strings.TrimSpace(cred.APIKey) != "" {
 		c.headers["X-App-Id"] = cred.AppID
 		c.headers["X-App-Key"] = cred.APIKey
-		return nil
+		if strings.TrimSpace(cred.Username) == "" || strings.TrimSpace(cred.Password) == "" {
+			return nil
+		}
 	}
 	if strings.TrimSpace(cred.Username) != "" && strings.TrimSpace(cred.Password) != "" {
 		return c.login(ctx, cred.Username, cred.Password)
@@ -137,42 +146,62 @@ func (c *client) applyAuth(ctx context.Context, account domain.Account) error {
 }
 
 func (c *client) login(ctx context.Context, username, password string) error {
+	appID, hadAppID := c.headers["X-App-Id"]
+	appKey, hadAppKey := c.headers["X-App-Key"]
+	delete(c.headers, "X-App-Id")
+	delete(c.headers, "X-App-Key")
+	defer func() {
+		if hadAppID {
+			c.headers["X-App-Id"] = appID
+		}
+		if hadAppKey {
+			c.headers["X-App-Key"] = appKey
+		}
+	}()
+
 	csrf := c.fetchCSRF(ctx)
 	if csrf != "" {
 		c.headers["X-CSRFToken"] = csrf
 	}
-	payloads := []map[string]string{
-		{"username": username, "password": password},
-		{"email": username, "password": password},
-	}
+	payload := map[string]string{"username": strings.TrimSpace(username), "password": password}
 	var lastBody []byte
 	var lastStatus int
 	var lastErr error
-	for _, payload := range payloads {
-		body, status, err := c.request(ctx, http.MethodPost, "/api/app/login/", payload)
-		if err == nil {
-			lastBody, lastStatus = body, status
-			if status < 400 && likelySuccess(body) {
-				if token := extractToken(body); token != "" {
-					c.headers["X-App-User-Token"] = token
-				}
+	body, status, err := c.request(ctx, http.MethodPost, "/api/app/login/", payload)
+	if err == nil {
+		lastBody, lastStatus = body, status
+		if status >= 200 && status < 300 {
+			if token := extractLoginToken(body); token != "" {
+				c.userToken = token
+				c.headers["X-App-User-Token"] = token
 				return nil
 			}
-		} else {
-			lastErr = err
+			msg := messageFromBody(body, "登录响应未返回用户 token")
+			return fmt.Errorf("%s", msg)
 		}
+		if msg := messageFromBody(body, ""); msg != "" {
+			lastErr = fmt.Errorf("%s", msg)
+		}
+	} else {
+		lastErr = err
 	}
 	form := url.Values{}
 	form.Set("username", username)
 	form.Set("password", password)
-	body, status, err := c.form(ctx, "/api/app/login/", form)
+	body, status, err = c.form(ctx, "/api/app/login/", form)
 	if err == nil {
 		lastBody, lastStatus = body, status
-		if status < 400 && likelySuccess(body) {
-			if token := extractToken(body); token != "" {
+		if status >= 200 && status < 300 {
+			if token := extractLoginToken(body); token != "" {
+				c.userToken = token
 				c.headers["X-App-User-Token"] = token
+				return nil
 			}
-			return nil
+			msg := messageFromBody(body, "登录响应未返回用户 token")
+			return fmt.Errorf("%s", msg)
+		}
+		if msg := messageFromBody(body, ""); msg != "" {
+			lastErr = fmt.Errorf("%s", msg)
 		}
 	} else {
 		lastErr = err
@@ -223,11 +252,7 @@ func (c *client) request(ctx context.Context, method, path string, payload any) 
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	for k, v := range c.headers {
-		if strings.TrimSpace(v) != "" {
-			req.Header.Set(k, v)
-		}
-	}
+	c.applyAuthHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -240,6 +265,10 @@ func (c *client) request(ctx context.Context, method, path string, payload any) 
 	return raw, resp.StatusCode, nil
 }
 
+func (c *client) postSignIn(ctx context.Context, path string) ([]byte, int, error) {
+	return c.request(ctx, http.MethodPost, path, map[string]any{})
+}
+
 func (c *client) form(ctx context.Context, path string, form url.Values) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, httpx.JoinURL(c.baseURL, path), strings.NewReader(form.Encode()))
 	if err != nil {
@@ -247,11 +276,7 @@ func (c *client) form(ctx context.Context, path string, form url.Values) ([]byte
 	}
 	c.setBrowserHeaders(req)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	for k, v := range c.headers {
-		if strings.TrimSpace(v) != "" {
-			req.Header.Set(k, v)
-		}
-	}
+	c.applyAuthHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -265,13 +290,100 @@ func (c *client) form(ctx context.Context, path string, form url.Values) ([]byte
 }
 
 func (c *client) setBrowserHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	if base, err := url.Parse(c.baseURL); err == nil {
 		req.Header.Set("Origin", base.Scheme+"://"+base.Host)
-		req.Header.Set("Referer", httpx.JoinURL(c.baseURL, "/login"))
+		req.Header.Set("Referer", httpx.JoinURL(c.baseURL, "/"))
 	}
+}
+
+func (c *client) applyAuthHeaders(req *http.Request) {
+	if c.userToken != "" {
+		req.Header.Set("X-App-User-Token", c.userToken)
+	}
+	if c.hasWebCookie() {
+		cookie := strings.TrimSpace(c.account.Credential.Cookie)
+		if cookie == "" {
+			cookie = buildCookieHeader(c.account.Credential)
+		}
+		if cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+	}
+	if csrf := c.csrfToken(); csrf != "" {
+		req.Header.Set("X-CSRFToken", csrf)
+	}
+	if c.userToken == "" && !c.hasWebCookie() {
+		if appID := strings.TrimSpace(c.headers["X-App-Id"]); appID != "" {
+			req.Header.Set("X-App-Id", appID)
+		}
+		if apiKey := strings.TrimSpace(c.headers["X-App-Key"]); apiKey != "" {
+			req.Header.Set("X-App-Key", apiKey)
+		}
+	}
+	for k, v := range c.headers {
+		if c.hasWebSessionAuth() && isDeveloperAuthHeader(k) {
+			continue
+		}
+		if strings.TrimSpace(v) != "" && req.Header.Get(k) == "" {
+			req.Header.Set(k, v)
+		}
+	}
+}
+
+func (c *client) hasWebSessionAuth() bool {
+	return c.userToken != "" || c.hasWebCookie()
+}
+
+func isDeveloperAuthHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "x-app-id", "x-app-key":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *client) hasWebCookie() bool {
+	cred := c.account.Credential
+	return strings.TrimSpace(cred.Cookie) != "" ||
+		strings.TrimSpace(cred.SessionID) != "" ||
+		strings.TrimSpace(cred.CSRFToken) != ""
+}
+
+func (c *client) csrfToken() string {
+	if token := strings.TrimSpace(c.headers["X-CSRFToken"]); token != "" {
+		return token
+	}
+	cred := c.account.Credential
+	if token := strings.TrimSpace(cred.CSRFToken); token != "" {
+		return token
+	}
+	if token := extractCookieValue(cred.Cookie, "csrftoken"); token != "" {
+		return token
+	}
+	if c.http != nil && c.http.Jar != nil {
+		base, _ := url.Parse(c.baseURL)
+		for _, ck := range c.http.Jar.Cookies(base) {
+			if ck.Name == "csrftoken" {
+				return ck.Value
+			}
+		}
+	}
+	return ""
+}
+
+func buildCookieHeader(cred domain.AccountCredential) string {
+	var parts []string
+	if v := strings.TrimSpace(cred.SessionID); v != "" {
+		parts = append(parts, "sessionid="+v)
+	}
+	if v := strings.TrimSpace(cred.CSRFToken); v != "" {
+		parts = append(parts, "csrftoken="+v)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (c *client) setCookie(raw string) {
@@ -295,35 +407,53 @@ func (c *client) setCookie(raw string) {
 }
 
 func (c *client) discoverCheckinPath(ctx context.Context) (string, error) {
-	var blobs []string
-	var scripts []string
-	body, status, err := c.request(ctx, http.MethodGet, "/", nil)
-	if err == nil && status < 400 {
-		text := string(body)
-		blobs = append(blobs, text)
-		scripts = append(scripts, scriptSources(text)...)
-	}
+	queue := []string{httpx.JoinURL(c.baseURL, "/")}
 	seen := map[string]bool{}
-	for _, src := range scripts {
-		if seen[src] || len(seen) > 15 {
+	for len(queue) > 0 && len(seen) < 80 {
+		currentURL := queue[0]
+		queue = queue[1:]
+		if seen[currentURL] {
 			continue
 		}
-		seen[src] = true
-		body, status, err := c.request(ctx, http.MethodGet, src, nil)
-		if err == nil && status < 400 {
-			blobs = append(blobs, string(body))
+		seen[currentURL] = true
+		body, err := c.fetchText(ctx, currentURL)
+		if err != nil {
+			continue
 		}
-	}
-	re := regexp.MustCompile(`["'](/api/[^"']*checkin[^"']*)["']`)
-	for _, blob := range blobs {
-		matches := re.FindAllStringSubmatch(blob, -1)
-		for _, m := range matches {
-			if len(m) > 1 && strings.Contains(strings.ToLower(m[1]), "checkin") {
-				return strings.ReplaceAll(m[1], `\u0026`, "&"), nil
+		if path := extractCheckinPath(body); path != "" {
+			return strings.ReplaceAll(path, `\u0026`, "&"), nil
+		}
+		for _, assetURL := range scriptSources(body, currentURL) {
+			if !seen[assetURL] {
+				queue = append(queue, assetURL)
 			}
 		}
 	}
 	return "", fmt.Errorf("未发现聚影签到路径")
+}
+
+func (c *client) fetchText(ctx context.Context, rawURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	c.setBrowserHeaders(req)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/javascript,text/javascript,*/*")
+	c.applyAuthHeaders(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("GET %s returned HTTP %d", rawURL, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func (c *client) mergeProfile(ctx context.Context, result *domain.SignInResult) {
@@ -353,6 +483,9 @@ func parseJuYingResult(raw []byte, status int) domain.SignInResult {
 	if err := json.Unmarshal(raw, &obj); err == nil {
 		result.Success = successFromMap(obj, result.Success)
 		result.Message = messageFromMap(obj, result.Message)
+		if isAlreadyCheckedIn(result.Message) {
+			result.Success = true
+		}
 		src := unwrapData(obj)
 		mergeJuYingMap(&result, src)
 		return result
@@ -437,8 +570,11 @@ func likelySuccess(raw []byte) bool {
 	return !containsAny(text, []string{"失败", "错误", "error", "failed", "unauthorized"})
 }
 
-func extractToken(raw []byte) string {
-	return extractTokenByKeys(raw, "token", "access", "access_token", "accessToken", "key", "app_user_token", "user_token")
+func extractLoginToken(raw []byte) string {
+	if token := extractTokenByKeys(raw, "token", "user_token", "app_user_token"); token != "" {
+		return token
+	}
+	return extractTokenByKeys(raw, "access", "access_token", "accessToken", "key")
 }
 
 func extractTokenByKeys(raw []byte, keys ...string) string {
@@ -476,16 +612,73 @@ func extractCookieValue(raw, name string) string {
 	return ""
 }
 
-func scriptSources(html string) []string {
-	re := regexp.MustCompile(`(?i)<script[^>]+src=["']([^"']+\.js[^"']*)["']`)
-	matches := re.FindAllStringSubmatch(html, -1)
+func scriptSources(html string, baseURL string) []string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)<(?:script|link)[^>]+(?:src|href)=["']([^"']+\.js(?:\?[^"']*)?)["']`),
+		regexp.MustCompile(`(?i)["']((?:\./)?(?:assets/)?[^"']*(?:checkin|signin)[^"']*\.js(?:\?[^"']*)?)["']`),
+	}
 	var out []string
-	for _, m := range matches {
-		if len(m) > 1 {
-			out = append(out, strings.ReplaceAll(m[1], `\u0026`, "&"))
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return out
+	}
+	seen := map[string]bool{}
+	for _, re := range patterns {
+		matches := re.FindAllStringSubmatch(html, -1)
+		for _, m := range matches {
+			if len(m) < 2 {
+				continue
+			}
+			resolved := resolveScriptURL(base, strings.ReplaceAll(m[1], `\u0026`, "&"))
+			if resolved != "" && !seen[resolved] {
+				seen[resolved] = true
+				out = append(out, resolved)
+			}
 		}
 	}
 	return out
+}
+
+func resolveScriptURL(base *url.URL, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if base == nil || ref == "" {
+		return ""
+	}
+	if strings.HasPrefix(ref, "assets/") && strings.Contains(base.Path, "/assets/") {
+		resolved := *base
+		resolved.RawQuery = ""
+		resolved.Fragment = ""
+		prefix := base.Path[:strings.Index(base.Path, "/assets/")]
+		resolved.Path = strings.TrimRight(prefix, "/") + "/" + ref
+		return resolved.String()
+	}
+	parsedRef, err := url.Parse(ref)
+	if err != nil {
+		return ""
+	}
+	return base.ResolveReference(parsedRef).String()
+}
+
+func extractCheckinPath(source string) string {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile("doCheckin\\s*[:=]\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)?\\s*=>\\s*[^;}{]{0,500}?\\.(?:post|get)\\(\\s*[\"'`]([^\"'`]+)[\"'`]"),
+		regexp.MustCompile("doCheckin\\s*\\([^)]*\\)\\s*\\{\\s*return\\s+[^;}{]{0,500}?\\.(?:post|get)\\(\\s*[\"'`]([^\"'`]+)[\"'`]"),
+		regexp.MustCompile("doCheckin\\s*[:=]\\s*function[^\\{]*\\{\\s*return\\s+[^;}{]{0,500}?\\.(?:post|get)\\(\\s*[\"'`]([^\"'`]+)[\"'`]"),
+		regexp.MustCompile("[\"'`]((?:https?://[^\"'`]+)?/api/[^\"'`]*checkin[^\"'`]*)[\"'`]"),
+	}
+	for _, pattern := range patterns {
+		matches := pattern.FindAllStringSubmatch(source, -1)
+		for _, match := range matches {
+			if len(match) < 2 {
+				continue
+			}
+			path := strings.TrimSpace(match[1])
+			if path != "" && strings.Contains(strings.ToLower(path), "checkin") {
+				return path
+			}
+		}
+	}
+	return ""
 }
 
 func unwrapData(obj map[string]any) map[string]any {
@@ -511,6 +704,9 @@ func successFromMap(obj map[string]any, fallback bool) bool {
 		return status == "ok" || status == "success" || status == "done"
 	}
 	msg := messageFromMap(obj, "")
+	if isAlreadyCheckedIn(msg) {
+		return true
+	}
 	if containsAny(msg, []string{"成功", "已签到", "already", "success"}) {
 		return true
 	}
@@ -518,6 +714,14 @@ func successFromMap(obj map[string]any, fallback bool) bool {
 		return false
 	}
 	return fallback
+}
+
+func isAlreadyCheckedIn(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(message, "已签到") ||
+		strings.Contains(message, "已经签到") ||
+		strings.Contains(message, "already checked") ||
+		strings.Contains(message, "already signed")
 }
 
 func messageFromBody(raw []byte, fallback string) string {
