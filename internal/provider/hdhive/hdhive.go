@@ -109,7 +109,7 @@ func (p *Provider) openAPISignIn(ctx context.Context, account domain.Account, se
 
 func (p *Provider) webSignIn(ctx context.Context, account domain.Account, settings domain.Settings, baseURL string) (provider.Result, error) {
 	var lastErr error
-	for _, host := range hdhiveBaseURLCandidates(baseURL) {
+	for _, host := range hostCandidates(baseURL) {
 		result, err := p.webSignInHost(ctx, account, settings, host)
 		if err == nil {
 			return result, nil
@@ -1209,49 +1209,6 @@ func hostCandidates(baseURL string) []string {
 		}
 	}
 	add(baseURL)
-	return out
-}
-
-func hdhiveBaseURLCandidates(baseURL string) []string {
-	baseURL = resolveHDHiveSignBaseURL(baseURL)
-	parsed, err := url.Parse(baseURL)
-	scheme := "https"
-	port := ""
-	host := ""
-	if err == nil {
-		if parsed.Scheme != "" {
-			scheme = parsed.Scheme
-		}
-		host = strings.ToLower(strings.TrimSpace(parsed.Hostname()))
-		if parsed.Port() != "" {
-			port = ":" + parsed.Port()
-		}
-	}
-	if host == "" {
-		host = "hdhive.com"
-	}
-
-	var out []string
-	addHost := func(candidate string) {
-		candidate = strings.ToLower(strings.TrimSpace(candidate))
-		if candidate == "" {
-			return
-		}
-		raw := fmt.Sprintf("%s://%s%s", scheme, candidate, port)
-		for _, existing := range out {
-			if existing == raw {
-				return
-			}
-		}
-		out = append(out, raw)
-	}
-
-	addHost(host)
-	if strings.HasSuffix(host, "hdhive.com") || strings.HasSuffix(host, "hdhive.org") || strings.HasSuffix(host, "hdhive.online") {
-		addHost("hdhive.com")
-		addHost("hdhive.org")
-		addHost("hdhive.online")
-	}
 	return out
 }
 

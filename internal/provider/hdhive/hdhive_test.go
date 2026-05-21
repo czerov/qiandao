@@ -296,11 +296,11 @@ func TestHostCandidatesAvoidOfflineMirrors(t *testing.T) {
 	}
 }
 
-func TestHDHiveBaseURLCandidatesIncludeOfficialMirrors(t *testing.T) {
-	got := strings.Join(hdhiveBaseURLCandidates("https://hdhive.com"), ",")
-	want := "https://hdhive.com,https://hdhive.org,https://hdhive.online"
+func TestWebSignInHostCandidatesUseDotComOnly(t *testing.T) {
+	got := strings.Join(hostCandidates("https://hdhive.online"), ",")
+	want := "https://hdhive.com"
 	if got != want {
-		t.Fatalf("hdhiveBaseURLCandidates() = %q, want %q", got, want)
+		t.Fatalf("hostCandidates() = %q, want %q", got, want)
 	}
 }
 
