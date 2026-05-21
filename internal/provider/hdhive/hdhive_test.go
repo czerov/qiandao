@@ -2,6 +2,7 @@ package hdhive
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,19 +19,28 @@ func TestFindActionIDFromCreateServerReference(t *testing.T) {
 	}
 }
 
+func TestFindActionIDFromCurrentHDHiveLoginChunkShape(t *testing.T) {
+	const chunk = `let d=(0,s.createServerReference)("60580c09f61d392c3d56ffd69ac1a901df5c7f03a4",s.callServer,void 0,s.findSourceMapURL,"login");`
+	got := findActionID(chunk, []string{"login"})
+	if got != hdhiveLoginActionFallback {
+		t.Fatalf("findActionID() = %q, want current fallback %q", got, hdhiveLoginActionFallback)
+	}
+}
+
 func TestHDHiveLoginActionPayload(t *testing.T) {
-	payload := nextActionPayload(map[string]string{
-		"username": "user@example.com",
-		"password": "12345678",
-	}, "/")
+	payload := hdhiveLoginActionPayload("user@example.com", "12345678")
 	for _, want := range []string{
 		`"username":"user@example.com"`,
-		`"password":"12345678"`,
+		`"password":"` + base64.StdEncoding.EncodeToString([]byte("12345678")) + `"`,
+		`"password_transport":"base64"`,
 		`"/"`,
 	} {
 		if !strings.Contains(payload, want) {
 			t.Fatalf("payload %q missing %q", payload, want)
 		}
+	}
+	if strings.Contains(payload, `"password":"12345678"`) {
+		t.Fatalf("payload should not contain plain password: %q", payload)
 	}
 }
 
@@ -128,7 +138,7 @@ func TestRememberAttemptSkipsNotFoundHTML(t *testing.T) {
 	}
 }
 
-func TestLoginKeepsActionNotFoundOverLegacyFallback(t *testing.T) {
+func TestLoginReturnsActionNotFoundWhenNoOtherFallbackWorks(t *testing.T) {
 	actionChunk := `let d=(0,s.createServerReference)("` + hdhiveLoginActionFallback + `",s.callServer,void 0,s.findSourceMapURL,"login");`
 	notFoundHTML := []byte(`<!DOCTYPE html><html lang="zh-Hans"><head><title>404</title></head></html>`)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +181,8 @@ func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 				r.Header.Get("Next-Router-State-Tree") == hdhiveLoginRouterStateTree &&
 				r.Header.Get("x-nextjs-post") == "1"
 			raw, _ := io.ReadAll(r.Body)
-			sawPlainPassword = strings.Contains(string(raw), `"password":"password123"`)
+			sawPlainPassword = strings.Contains(string(raw), `"password":"`+base64.StdEncoding.EncodeToString([]byte("password123"))+`"`) &&
+				strings.Contains(string(raw), `"password_transport":"base64"`)
 			http.SetCookie(w, &http.Cookie{Name: "session", Value: "ok", Path: "/"})
 			w.WriteHeader(http.StatusSeeOther)
 		case "/chunk.js":
@@ -190,10 +201,25 @@ func TestLoginActionCapturesCookieWithBrowserHeaders(t *testing.T) {
 		t.Fatal("login action did not include HDHive browser-compatible action headers")
 	}
 	if !sawPlainPassword {
-		t.Fatal("login action did not use AetherFlow-compatible plain password payload")
+		t.Fatal("login action did not use HDHive-compatible base64 password payload")
 	}
 	if got := authCookieString(client, srv.URL); !strings.Contains(got, "session=ok") {
 		t.Fatalf("authCookieString() = %q, want session cookie", got)
+	}
+}
+
+func TestLoginActionCandidatesIncludeCurrentAndLegacyFallbacks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html><head></head><body>login</body></html>`))
+	}))
+	defer srv.Close()
+
+	ids := actionIDCandidates(context.Background(), srv.Client(), srv.URL, []string{"login"}, "/login", "")
+	if len(ids) < 2 {
+		t.Fatalf("actionIDCandidates() = %#v, want current and legacy fallbacks", ids)
+	}
+	if ids[len(ids)-2] != hdhiveLoginActionFallback || ids[len(ids)-1] != hdhiveLegacyLoginActionID {
+		t.Fatalf("actionIDCandidates() = %#v, want current then legacy fallbacks", ids)
 	}
 }
 

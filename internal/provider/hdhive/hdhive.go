@@ -3,6 +3,7 @@ package hdhive
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,12 +24,13 @@ type Provider struct{}
 
 const (
 	hdhiveBrowserUA             = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-	hdhiveLoginActionFallback   = "603b753f736d128b24c8b4f894057aa301eda77339"
+	hdhiveLoginActionFallback   = "60580c09f61d392c3d56ffd69ac1a901df5c7f03a4"
+	hdhiveLegacyLoginActionID   = "603b753f736d128b24c8b4f894057aa301eda77339"
 	hdhiveCheckinActionFallback = "40efbc107064215e9eff178b0466274739ba7d9cb4"
 	hdhiveDugouActionFallback   = "f30185aabded8ca281fe911b11b1dbdba999fa1f"
 	hdhiveLoginRouterStateTree  = `%5B%22%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22login%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%5D%7D%5D%7D%5D`
 	hdhiveAppRouterStateTree    = `%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2F%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D`
-	hdhiveMaxActionChunkFetches = 30
+	hdhiveMaxActionChunkFetches = 80
 )
 
 func New() *Provider {
@@ -267,7 +269,7 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 		}
 		rememberAttempt(&lastBody, &lastStatus, &lastErr, body, status, err)
 	}
-	if err := tryNextAction(ctx, client, baseURL, []string{"login", "signIn"}, fmt.Sprintf(`["%s","%s"]`, escapeJSONString(username), escapeJSONString(password)), "/login", loginPageBody); err == nil {
+	if err := tryNextAction(ctx, client, baseURL, []string{"login", "signIn"}, hdhiveLoginActionPayload(username, password), "/login", loginPageBody); err == nil {
 		return nil
 	} else {
 		if actionErr == nil {
@@ -297,10 +299,7 @@ func login(ctx context.Context, client *http.Client, baseURL, username, password
 }
 
 func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, pageBody, username, password string) error {
-	payload := nextActionPayload(map[string]string{
-		"username": username,
-		"password": password,
-	}, "/")
+	payload := hdhiveLoginActionPayload(username, password)
 	body, status, err := postNextAction(ctx, client, baseURL, []string{"login"}, payload, "/login", pageBody)
 	if err != nil {
 		return err
@@ -313,6 +312,14 @@ func tryHdhiveLoginAction(ctx context.Context, client *http.Client, baseURL, pag
 		return fmt.Errorf("%s (HTTP %d)", msg, status)
 	}
 	return nil
+}
+
+func hdhiveLoginActionPayload(username, password string) string {
+	return nextActionPayload(map[string]string{
+		"username":           username,
+		"password":           base64.StdEncoding.EncodeToString([]byte(password)),
+		"password_transport": "base64",
+	}, "/")
 }
 
 func webCheckIn(ctx context.Context, client *http.Client, baseURL string, dog bool) ([]byte, int, error) {
@@ -504,6 +511,7 @@ func actionIDCandidates(ctx context.Context, client *http.Client, baseURL string
 	}
 	if isLoginAction(names) {
 		out = appendUniqueString(out, hdhiveLoginActionFallback)
+		out = appendUniqueString(out, hdhiveLegacyLoginActionID)
 	} else {
 		for _, name := range names {
 			if strings.Contains(strings.ToLower(name), "checkin") || strings.Contains(strings.ToLower(name), "signin") {
